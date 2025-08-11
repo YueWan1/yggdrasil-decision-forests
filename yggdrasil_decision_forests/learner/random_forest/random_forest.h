@@ -106,6 +106,7 @@ class RandomForestLearner : public AbstractLearner {
     model::proto::LearnerCapabilities capabilities;
     capabilities.set_support_max_training_duration(true);
     capabilities.set_support_max_model_size_in_memory(true);
+    capabilities.set_support_return_in_bag_example_indices(true);
     return capabilities;
   }
 
@@ -185,13 +186,16 @@ absl::Status ComputeVariableImportancesFromAccumulatedPredictions(
     const dataset::VerticalDataset& dataset, const int num_threads,
     RandomForestModel* model);
 
-// Selects the examples to train one tree. Selects "num_samples" integers in [0,
-// num_examples[ with replacement.
-void SampleTrainingExamples(const UnsignedExampleIdx num_examples,
-                            const UnsignedExampleIdx num_samples,
-                            const bool with_replacement,
-                            utils::RandomEngine* random,
-                            std::vector<UnsignedExampleIdx>* selected);
+// Randomly samples a list of training examples to use for training a single
+// decision tree. The number of sampled examples is determined from the Random
+// Forest Training Config. If `bootstrap_size_ratio_factor` is provided, the
+// number of sampled examples is further scaled by this factor, provided that
+// this is enabled in the training configuration.
+absl::Status SampleTrainingExamples(
+    UnsignedExampleIdx num_examples,
+    const proto::RandomForestTrainingConfig& rf_config,
+    std::optional<double> bootstrap_size_ratio_factor,
+    utils::RandomEngine* random, std::vector<UnsignedExampleIdx>* selected);
 
 // Exports the Out-of-bag predictions of a model to disk.
 absl::Status ExportOOBPredictions(
