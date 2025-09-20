@@ -1,0 +1,30 @@
+MIGHT Multiple Runs Analysis Results
+===================================
+
+Configuration:
+  Number of runs: 10
+  Trees per run: 100000
+  Bootstrap ratio: 1.6
+  Honest ratio: 0.367
+  Target specificity: 0.98
+
+Results:
+  Successful runs: 10/10
+  S@98% Statistics:
+    Mean: 0.693137
+    Std Dev: 0.00765711
+    Min: 0.676471
+    Max: 0.705882
+    95% CI: [0.688391, 0.697883]
+
+Individual Results:
+  Run 1: 0.696078
+  Run 2: 0.696078
+  Run 3: 0.696078
+  Run 4: 0.676471
+  Run 5: 0.696078
+  Run 6: 0.696078
+  Run 7: 0.696078
+  Run 8: 0.686275
+  Run 9: 0.686275
+  Run 10: 0.705882
