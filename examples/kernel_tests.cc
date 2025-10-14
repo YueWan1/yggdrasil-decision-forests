@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
 
 
   // Evaluate model 
-  LOG(INFO) << "Evaluate model";
+  LOG(INFO) << "Evaluate model using slow engine";
   ydf::dataset::VerticalDataset test_dataset;
   QCHECK_OK(ydf::dataset::LoadVerticalDataset(test_path, model->data_spec(),
                                               &test_dataset));
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
 
   // Test kernel engine
   auto engine_or = model->BuildFastEngine();
-  LOG(INFO) << "Do we use fast engine on this inference? " << engine_or.ok();
+  LOG(INFO) << "Can fast engine be used " << engine_or.ok();
 
 
   // Save the raw evaluation 

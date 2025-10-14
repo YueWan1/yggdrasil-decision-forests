@@ -57,7 +57,7 @@ absl::Status AppendEvaluation(const AbstractModel& model,
   }
 
   auto engine_or_status = model.BuildFastEngine();
-  LOG(INFO) << "Disable fast engine for debugging : " ;
+  LOG(INFO) << "Disable fast engine when kernel method is enabled : " ;
   if (false) {
   //if (engine_or_status.ok()) {
     const auto engine = std::move(engine_or_status.value());

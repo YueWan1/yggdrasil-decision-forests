@@ -384,7 +384,7 @@ void RandomForestModel::PredictClassification(
       data_spec_.columns(label_col_idx_)
           .categorical()
           .number_of_unique_values());
-  std::cerr << "[DEBUG] Entered PredictClassification1111111. kernel_method_: " << kernel_method_ << std::endl;
+  //std::cerr << "[DEBUG] Entered PredictClassification1111111. kernel_method_: " << kernel_method_ << std::endl;
   CallOnAllLeafs(dataset, row_idx,
                  [&accumulator, this](const decision_tree::proto::Node& node) {
                    internal::AddClassificationLeafToAccumulator(
