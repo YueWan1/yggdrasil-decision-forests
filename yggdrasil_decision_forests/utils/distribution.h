@@ -849,18 +849,10 @@ template <typename P>
 void IntegerDistribution<T>::AddNormalizedProto(const P& v) {
   DCHECK_EQ(NumClasses(), v.counts_size());
   if (v.sum() == 0) return;
-  std::cout << "[AddNormalizedProto] Before: sum_=" << sum_ 
-            << ", count(1)=" << counts_[1] 
-            << ", count(2)=" << counts_[2] << std::endl;
-
   sum_++;
   for (int i = 0; i < counts_.size(); i++) {
     counts_[i] += v.counts(i) / v.sum();
   }
-  std::cout << "[AddNormalizedProto] After:  sum_=" << sum_ 
-            << ", count(1)=" << counts_[1] 
-            << ", count(2)=" << counts_[2] << std::endl;
-  std::cout << std::endl;
 }
 
 template <typename T>
@@ -868,19 +860,10 @@ template <typename P>
 void IntegerDistribution<T>::AddProto(const P& v) {
   DCHECK_EQ(NumClasses(), v.counts_size());
   if (v.sum() == 0) return;
-
-  std::cout << "[AddProto] Before: sum_=" << sum_ 
-            << ", count(1)=" << counts_[1] 
-            << ", count(2)=" << counts_[2] << std::endl;
-
   sum_ += v.sum(); 
   for (int i = 0; i < counts_.size(); i++) {
     counts_[i] += v.counts(i);  
   }
-  std::cout << "[AddProto] After:  sum_=" << sum_ 
-            << ", count(1)=" << counts_[1] 
-            << ", count(2)=" << counts_[2] << std::endl;
-  std::cout << std::endl;
 }
 
 template <typename T>

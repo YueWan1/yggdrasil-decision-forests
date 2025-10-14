@@ -543,7 +543,10 @@ absl::Status AbstractModel::AppendEvaluation(
   if (!option.force_slow_engine()) {
     engine_or_status = BuildFastEngine();
   }
-  if (engine_or_status.ok()) {
+  //if (engine_or_status.ok()) {
+  std::cout << "Enter append evaluation function with slow engine " << std::endl;
+  if (false) {
+  
     RETURN_IF_ERROR(AppendEvaluationWithEngine(dataset, option, weight_links,
                                                *engine_or_status.value(), rnd,
                                                predictions, eval));
@@ -589,6 +592,7 @@ absl::Status AbstractModel::AppendEvaluationOverrideType(
 
   auto engine_or_status = BuildFastEngine();
   if (engine_or_status.ok()) {
+    std::cout << "[DEBUG] kernel_method in AppendEvaluationOverrideType " << this->kernel_method() << std::endl;
     RETURN_IF_ERROR(AppendEvaluationWithEngineOverrideType(
         dataset, option, override_task, override_label_col_idx,
         override_group_col_idx, weight_links, *engine_or_status.value(), rnd,
@@ -1440,7 +1444,9 @@ AbstractModel::BuildFastEngine(
         << "Engine \"" << engine_factory->name() << "\" built";
     STATUS_CHECK(engine_or.value());
   }
-  return engine_or;
+  //return engine_or;
+  return absl::Status(absl::StatusCode::kInternal, "DISABLING FAST ENGINE FOR ALL INFERENCE");
+  
 }
 
 std::optional<size_t> AbstractModel::AbstractAttributesSizeInBytes() const {

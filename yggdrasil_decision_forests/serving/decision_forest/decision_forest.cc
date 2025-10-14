@@ -544,25 +544,7 @@ absl::Status SetLeafNodeRandomForestBinaryClassification(
         /*.right_idx =*/0,
         /*.feature_idx =*/0,
         /*.label =*/((vote == 2) ? (1.0f / src_model.NumTrees()) : 0.0f));
-  } 
-  if (src_model.kernel_method()) {
-      const auto& distribution = src_node.node().classifier().distribution();
-      if (distribution.counts_size() != 3) {
-        return absl::InvalidArgumentError(
-            "The model is not a binary classifier. You likely used the wrong "
-            "optimized model class (see header of "
-            "yggdrasil_decision_forests/serving/decision_forest/"
-            "decision_forest.h).");
-      }
-      *dst_node = Node::Leaf(
-        /*.right_idx =*/0,
-        /*.feature_idx =*/0,
-        /*.num_ct =*/static_cast<float>(distribution.counts(2)),
-        /*.den_ct =*/static_cast<float>(distribution.sum()),
-      )
-
-  } 
-  else {
+  } else {
     const auto& distribution = src_node.node().classifier().distribution();
     if (distribution.counts_size() != 3) {
       return absl::InvalidArgumentError(
