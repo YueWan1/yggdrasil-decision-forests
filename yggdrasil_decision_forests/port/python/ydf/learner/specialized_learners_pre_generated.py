@@ -431,7 +431,7 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
     inference in a classification random forest. If true, each tree outputs 
     unnormalized class count, and apply normalization after aggregating counts
     from all trees. If false, each tree vote for a distribution of classes.
-    kernel_method=false is often preferable. Default: True.
+    kernel_method=false is often preferable. Default: False.
     working_dir: Path to a directory available for the learning algorithm to
       store intermediate computation results. Depending on the learning
       algorithm and parameters, the working_dir might be optional, required, or

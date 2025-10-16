@@ -13,16 +13,15 @@
  * limitations under the License.
  */
 
-// Honest Forest with Kernel Method training example.
-//
+
 // This program demonstrates:
-//   - Training an Honest Random Forest with Kernel Method
+//   - Training an Random Forest with Kernel Method
 //   - Evaluating the model on test dataset
 //   - Saving the trained model
 //
 // Usage example:
-//   bazel build //examples:train_honest_kernel_forest
-//   ./bazel-bin/examples/train_honest_kernel_forest --alsologtostderr
+//   bazel build //examples:kernel_tests
+//   ./bazel-bin/examples/kernel_tests --alsologtostderr
 
 #include "absl/flags/flag.h"
 #include "absl/log/log.h"

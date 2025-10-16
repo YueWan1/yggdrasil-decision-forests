@@ -109,11 +109,11 @@ std::vector<float> ConvertToPosteriorsFromOOBFile(
   std::vector<float> scores;
   scores.reserve(oob_predictions.size());
   for (const auto& row : oob_predictions) {
-    if (row.size() < 2) continue;                  // 缺两列，跳过
+    if (row.size() < 2) continue;                 
     const double neg = row[0], pos = row[1];
     const double tot = neg + pos;
-    if (tot <= 0.0) continue;                      // 没有OOB投票，跳过
-    scores.push_back(static_cast<float>(pos / tot)); // 概率而不是计数
+    if (tot <= 0.0) continue;                      
+    scores.push_back(static_cast<float>(pos / tot)); 
   }
   return scores;
 }

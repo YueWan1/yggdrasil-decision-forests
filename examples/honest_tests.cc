@@ -16,13 +16,10 @@
 // Honest Forest with Kernel Method training example.
 //
 // This program demonstrates:
-//   - Training an Honest Random Forest with Kernel Method
+//   - Training an Honest Random Forest
 //   - Evaluating the model on test dataset
 //   - Saving the trained model
 //
-// Usage example:
-//   bazel build //examples:train_honest_kernel_forest
-//   ./bazel-bin/examples/train_honest_kernel_forest --alsologtostderr
 
 #include "absl/flags/flag.h"
 #include "absl/log/log.h"
@@ -77,7 +74,7 @@ int main(int argc, char** argv) {
   // Create output directory 
   QCHECK_OK(file::RecursivelyCreateDir(output_dir, file::Defaults()));
 
-  LOG(INFO) << "=== Kernel Method w/wo Honest Setting Training ===";
+  LOG(INFO) << "=== Setting Training ===";
   LOG(INFO) << "Training data: " << train_path;
   LOG(INFO) << "Test data: " << test_path;
 
@@ -93,15 +90,9 @@ int main(int argc, char** argv) {
   const auto dataspec = ydf::dataset::CreateDataSpec(train_path,guide).value();
   QCHECK_OK(file::SetTextProto(dataspec_path, dataspec, file::Defaults()));
 
-  // Print dataspec
-  // LOG(INFO) << "Print dataspec";
-  // std::string dataspec_report = ydf::dataset::PrintHumanReadable(dataspec);
-  // LOG(INFO) << "Dataspec:\n" << dataspec_report;
-  // QCHECK_OK(
-  //     file::SetContent(absl::StrCat(dataspec_path, ".txt"), dataspec_report));
+  
 
   // Configure the learner 
-  LOG(INFO) << "Configure Kernel Method setting";
   ydf::model::proto::TrainingConfig train_config;
   train_config.set_learner("RANDOM_FOREST");
   train_config.set_task(ydf::model::proto::Task::CLASSIFICATION);
@@ -133,9 +124,7 @@ int main(int argc, char** argv) {
     LOG(INFO) << "  - Honest ratio: " << absl::GetFlag(FLAGS_honest_ratio);
     LOG(INFO) << "  - Fixed separation: " << absl::GetFlag(FLAGS_honest_fixed_separation);
   }
-  else {
-    LOG(INFO) << "Disabling Honesty";
-  }
+  
 
   // Create learner 
   std::unique_ptr<ydf::model::AbstractLearner> learner;
@@ -150,12 +139,7 @@ int main(int argc, char** argv) {
   const auto model_path = file::JoinPath(output_dir, "model");
   QCHECK_OK(ydf::model::SaveModel(model_path, *model));
 
-  // Show details about model 
-  std::string model_description = model->DescriptionAndStatistics();
-  LOG(INFO) << "Model:\n" << model_description;
-  QCHECK_OK(
-      file::SetContent(absl::StrCat(model_path, ".txt"), model_description));
-
+  
   // Evaluate model 
   LOG(INFO) << "Evaluate model";
   ydf::dataset::VerticalDataset test_dataset;
@@ -170,13 +154,17 @@ int main(int argc, char** argv) {
   std::string evaluation_path = file::JoinPath(output_dir, "evaluation.pbtxt");
   QCHECK_OK(file::SetTextProto(evaluation_path, evaluation, file::Defaults()));
 
+  // Test engine
+  auto engine_or = model->BuildFastEngine();
+  LOG(INFO) << "Can fast engine be used: " << engine_or.ok();
+
+
   // Save the evaluation in a text file 
   std::string evaluation_report = ydf::metric::TextReport(evaluation).value();
   QCHECK_OK(file::SetContent(absl::StrCat(evaluation_path, ".txt"),
                              evaluation_report));
   LOG(INFO) << "Evaluation:\n" << evaluation_report;
 
-  LOG(INFO) << "===  Kernel Method w/wo Honesty completed successfully! ===";
   LOG(INFO) << "The results are available in " << output_dir;
 
   return 0;

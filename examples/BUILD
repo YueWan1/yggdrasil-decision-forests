@@ -198,8 +198,8 @@ cc_binary(
 )
 
 cc_binary(
-    name = "honest_kernel_test",
-    srcs = ["honest_kernel_test.cc"],
+    name = "honest_tests",
+    srcs = ["honest_tests.cc"],
     deps = [
         "//yggdrasil_decision_forests/dataset:data_spec",
         "//yggdrasil_decision_forests/dataset:data_spec_inference",
