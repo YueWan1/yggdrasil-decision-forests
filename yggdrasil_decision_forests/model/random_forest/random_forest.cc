@@ -811,6 +811,8 @@ void AddClassificationLeafToAccumulator(
 void FinalizeClassificationLeafToAccumulator(
     utils::IntegerDistribution<float>& accumulator,
     model::proto::Prediction* prediction) {
+  std::cout << "[Finalize] Positive count: " << accumulator.count(2) << std::endl;
+  std::cout << "[Finalize] Negative count: " << accumulator.count(1) << std::endl;
   prediction->mutable_classification()->set_value(accumulator.TopClass());
   accumulator.Save(
       prediction->mutable_classification()->mutable_distribution());

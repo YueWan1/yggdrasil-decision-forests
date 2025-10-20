@@ -43,13 +43,27 @@ ABSL_FLAG(std::string, dataset_dir,
 ABSL_FLAG(std::string, output_dir, "/tmp/honest_forest",
           "Output directory to save the model and results");
 
-// Honest Forest 
+
+// Common Flags
+ABSL_FLAG(int, tree_depth, -1,
+          "Maximum depth of trees (-1 for unlimited).");
+// honesty
+ABSL_FLAG(float, bootstrap_ratio, 1.6f, "Bootstrap ratio (β in MIGHT paper)");
 ABSL_FLAG(bool, enable_honest, true, "Enable honest forest");
 ABSL_FLAG(float, honest_ratio, 0.5, "Honest ratio for leaf examples");
 ABSL_FLAG(bool, honest_fixed_separation, true, "Fixed separation for honest trees");
 
 // Kernel Method 
 ABSL_FLAG(bool, enable_kernel, false, "Whether to use kernel method");
+
+
+// Oblique split parameters (only used when feature_split_type = "Oblique")
+ABSL_FLAG(int, max_num_projections, 1000,
+          "Maximum number of projections for oblique splits.");
+ABSL_FLAG(float, projection_density_factor, 1.5f,
+          "Projection density factor.");
+ABSL_FLAG(float, num_projections_exponent, .5,
+          "Exponent to determine number of projections.");
 
 // Random Forest 
 ABSL_FLAG(int, num_trees, 1000, "Number of trees");
@@ -104,6 +118,10 @@ int main(int argc, char** argv) {
   rf_config.set_num_trees(absl::GetFlag(FLAGS_num_trees));
   rf_config.set_winner_take_all_inference(absl::GetFlag(FLAGS_winner_take_all));
   rf_config.set_bootstrap_training_dataset(true);
+  rf_config.set_bootstrap_size_ratio(absl::GetFlag(FLAGS_bootstrap_ratio));
+  rf_config.mutable_decision_tree()->set_min_examples(1);
+
+
 
   if (absl::GetFlag(FLAGS_enable_kernel)) {
     LOG(INFO) << "Enabling Kernel Method";
@@ -116,6 +134,17 @@ int main(int argc, char** argv) {
 
   if (absl::GetFlag(FLAGS_enable_honest)) {
     LOG(INFO) << "Enabling Honest Forest";
+
+    // Oblique
+    auto* sos = rf_config.mutable_decision_tree()->mutable_sparse_oblique_split();
+    sos->set_max_num_projections(
+        absl::GetFlag(FLAGS_max_num_projections));
+    sos->set_projection_density_factor(
+        absl::GetFlag(FLAGS_projection_density_factor));
+    sos->set_num_projections_exponent(
+        absl::GetFlag(FLAGS_num_projections_exponent));
+
+
     auto* dt_config = rf_config.mutable_decision_tree();
     auto* honest_config = dt_config->mutable_honest();
     honest_config->set_ratio_leaf_examples(absl::GetFlag(FLAGS_honest_ratio));
