@@ -108,6 +108,15 @@ class RandomForestLearner : public AbstractLearner {
     capabilities.set_support_max_model_size_in_memory(true);
     return capabilities;
   }
+
+  // Returns the indices of the in-bag examples for the ith tree without
+  // performing the training.
+  //
+  // If the random seeds for the individual trees are not stored in the training
+  // configuration, this function re-generates a random seed for each tree every
+  // time it is called.
+  absl::StatusOr<std::vector<UnsignedExampleIdx>> GetTrainingExampleIndices(
+      UnsignedExampleIdx dataset_size, int tree_idx) const;
 };
 
 REGISTER_AbstractLearner(RandomForestLearner,

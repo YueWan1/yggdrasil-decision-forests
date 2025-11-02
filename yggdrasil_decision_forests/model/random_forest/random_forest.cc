@@ -801,6 +801,7 @@ void AddClassificationLeafToAccumulator(
     DCHECK(node.classifier().has_distribution());
     if (kernel_method) {
       accumulator->AddProto(node.classifier().distribution());
+      
     } else {
       accumulator->AddNormalizedProto(node.classifier().distribution());
     }
