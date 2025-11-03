@@ -5138,11 +5138,7 @@ return found_split ? SplitSearchResult::kBetterSplitFound
 
 
     // Evaluate Exit Conditions
-    if (selected_examples.size() < dt_config.min_examples() ||
-        (dt_config.max_depth() >= 0 && depth >= dt_config.max_depth()) ||
-        (internal_config.timeout.has_value() &&
-         internal_config.timeout < absl::Now()))
-    {
+    auto finalize_as_leaf = [&]() -> absl::Status {
       if (leaf_examples.has_value())
       {
         // Override the leaf values.
@@ -5155,6 +5151,13 @@ return found_split ? SplitSearchResult::kBetterSplitFound
       // Stop the growth of the branch.
       node->FinalizeAsLeaf(dt_config.store_detailed_label_distribution());
       return absl::OkStatus();
+    };
+
+    if (selected_examples.size() < dt_config.min_examples() ||
+        (dt_config.max_depth() >= 0 && depth >= dt_config.max_depth()) ||
+        (internal_config.timeout.has_value() &&
+        internal_config.timeout < absl::Now())) {
+      return finalize_as_leaf();
     }
     /* #endregion */
 
@@ -5245,10 +5248,7 @@ return found_split ? SplitSearchResult::kBetterSplitFound
     // IF better_split: split & recurse    // else: finalize as leaf
     if (!has_better_condition)
     {
-      // No good condition found. Close the branch.
-      // Ariel: what exactly does the "finalization" do?
-      node->FinalizeAsLeaf(dt_config.store_detailed_label_distribution());
-      return absl::OkStatus();
+      return finalize_as_leaf();
     }
 
     /*********** ELSE: BETTER CONDITION FOUND - SEARCH DEEPER **********/
@@ -5277,8 +5277,7 @@ return found_split ? SplitSearchResult::kBetterSplitFound
       // The splitter statistics don't match exactly the condition evaluation and
       // one of the children is pure.
       node->ClearChildren();
-      node->FinalizeAsLeaf(dt_config.store_detailed_label_distribution());
-      return absl::OkStatus();
+      return finalize_as_leaf();
     }
 
     // Separate the positive and negative examples used only to determine the node value.
@@ -5293,6 +5292,11 @@ return found_split ? SplitSearchResult::kBetterSplitFound
               train_dataset, *leaf_examples, node->node().condition(), false,
               dt_config.internal_error_on_wrong_splitter_statistics(),
               /*examples_are_training_examples=*/false));
+      if (node_only_example_split->positive_examples.empty() ||
+          node_only_example_split->negative_examples.empty()) {
+        node->ClearChildren();
+        return finalize_as_leaf();
+      }
     }
 
     /* #region Set leaf outputs // Ariel: What leaf outputs? I thought these weren't leaves /*/
