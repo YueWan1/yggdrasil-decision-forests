@@ -83,9 +83,7 @@ bool g_pred_inited = false;
 
 void InitPredFileOnce() {
   if (!g_pred_inited) {
-    // 路径你自己改，下面是写到 /tmp /ariel_v/yggdrasil-oblique-forests/might_results
     g_pred_file.open("might_results/pred_counts.csv", std::ios::out);
-    // 写表头
     g_pred_file << "neg_count,pos_count\n";
     g_pred_inited = true;
   }
