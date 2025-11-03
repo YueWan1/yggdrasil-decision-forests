@@ -27,6 +27,10 @@
 #include <utility>
 #include <vector>
 
+// add export support
+#include <fstream>
+#include <mutex>
+
 #include "absl/container/inlined_vector.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -67,6 +71,28 @@ constexpr char kNodeBaseFilename[] = "nodes";
 constexpr char kHeaderBaseFilename[] = "random_forest_header.pb";
 
 }  // namespace
+
+
+// add namespace for export raw counts
+namespace {
+
+// 全局文件、锁、是否初始化
+std::ofstream g_pred_file;
+std::mutex g_pred_mutex;
+bool g_pred_inited = false;
+
+void InitPredFileOnce() {
+  if (!g_pred_inited) {
+    // 路径你自己改，下面是写到 /tmp /ariel_v/yggdrasil-oblique-forests/might_results
+    g_pred_file.open("might_results/pred_counts.csv", std::ios::out);
+    // 写表头
+    g_pred_file << "neg_count,pos_count\n";
+    g_pred_inited = true;
+  }
+}
+
+}  // namespace
+
 
 constexpr char RandomForestModel::kRegisteredName[];
 constexpr char RandomForestModel::kVariableImportanceMeanDecreaseInAccuracy[];
@@ -814,6 +840,17 @@ void FinalizeClassificationLeafToAccumulator(
     model::proto::Prediction* prediction) {
   std::cout << "[Finalize] Positive count: " << accumulator.count(2) << std::endl;
   std::cout << "[Finalize] Negative count: " << accumulator.count(1) << std::endl;
+  InitPredFileOnce();
+  {
+    // 防止推理是并行的，写文件时加个锁
+    std::lock_guard<std::mutex> lock(g_pred_mutex);
+    // 你说要 col1=neg, col2=pos
+    g_pred_file << accumulator.count(1)  // neg
+                << ","
+                << accumulator.count(2)  // pos
+                << "\n";
+    // 可以不用 flush，每次都 flush 会慢；要的话加 g_pred_file.flush();
+  }
   prediction->mutable_classification()->set_value(accumulator.TopClass());
   accumulator.Save(
       prediction->mutable_classification()->mutable_distribution());

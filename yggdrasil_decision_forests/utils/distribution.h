@@ -870,12 +870,11 @@ void IntegerDistribution<T>::AddProto(const P& v) {
   for (int i = 0; i < counts_.size(); i++) {
     counts_[i] += v.counts(i);  
   }
-  std::cout << "[AddProto] After:  sum_=" << sum_ 
-            << ", count(1)=" << counts_[1] 
-            << ", count(2)=" << counts_[2] << std::endl;
-  std::cout << std::endl;
+  // std::cout << "[AddProto] After:  sum_=" << sum_ 
+  //           << ", count(1)=" << counts_[1] 
+  //           << ", count(2)=" << counts_[2] << std::endl;
+  // std::cout << std::endl;
 
-  
 }
 
 template <typename T>

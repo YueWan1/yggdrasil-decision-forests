@@ -37,7 +37,7 @@
 
 // Flags
 ABSL_FLAG(std::string, dataset_dir,
-          "cv_exports",
+          "might_data",
           "Input directory containing adult_train.csv and adult_test.csv");
 
 ABSL_FLAG(std::string, output_dir, "/tmp/honest_forest",
@@ -69,6 +69,11 @@ ABSL_FLAG(float, num_projections_exponent, .5,
 ABSL_FLAG(int, num_trees, 1000, "Number of trees");
 ABSL_FLAG(bool, winner_take_all, false, "Winner take all inference");
 
+
+
+ABSL_FLAG(int, random_seed, 1, "random seed");
+
+
 namespace ydf = yggdrasil_decision_forests;
 
 int main(int argc, char** argv) {
@@ -81,9 +86,9 @@ int main(int argc, char** argv) {
 
   // Training and testing dataset paths 
   const auto train_path =
-      absl::StrCat("csv:", file::JoinPath(dataset_dir, "fold1_train.csv"));
+      absl::StrCat("csv:", file::JoinPath(dataset_dir, "processed_wise1_data.csv"));
   const auto test_path =
-      absl::StrCat("csv:", file::JoinPath(dataset_dir, "fold1_test.csv"));
+      absl::StrCat("csv:", file::JoinPath(dataset_dir, "processed_wise1_data.csv"));
 
   // Create output directory 
   QCHECK_OK(file::RecursivelyCreateDir(output_dir, file::Defaults()));
@@ -98,7 +103,8 @@ int main(int argc, char** argv) {
   
   ydf::dataset::proto::DataSpecificationGuide guide;
   auto* col_guide = guide.add_column_guides();
-  col_guide->set_column_name_pattern("label");
+  //col_guide->set_column_name_pattern("label"); //processed wise-5
+  col_guide->set_column_name_pattern("Cancer Status"); //processed wise-1
   col_guide->set_type(ydf::dataset::proto::ColumnType::CATEGORICAL);
   
   const auto dataspec = ydf::dataset::CreateDataSpec(train_path,guide).value();
@@ -110,7 +116,10 @@ int main(int argc, char** argv) {
   ydf::model::proto::TrainingConfig train_config;
   train_config.set_learner("RANDOM_FOREST");
   train_config.set_task(ydf::model::proto::Task::CLASSIFICATION);
-  train_config.set_label("label");
+  //train_config.set_label("label"); // wise-5
+  train_config.set_label("Cancer Status");//wise-1
+  train_config.set_random_seed(absl::GetFlag(FLAGS_random_seed)); 
+
 
   auto& rf_config = *train_config.MutableExtension(
       ydf::model::random_forest::proto::random_forest_config);
@@ -119,7 +128,9 @@ int main(int argc, char** argv) {
   rf_config.set_winner_take_all_inference(absl::GetFlag(FLAGS_winner_take_all));
   rf_config.set_bootstrap_training_dataset(true);
   rf_config.set_bootstrap_size_ratio(absl::GetFlag(FLAGS_bootstrap_ratio));
-  rf_config.mutable_decision_tree()->set_min_examples(1);
+  rf_config.set_compute_oob_performances(false); //disable oob performance computation
+
+  rf_config.mutable_decision_tree()->set_min_examples(2);
 
 
 
@@ -131,6 +142,8 @@ int main(int argc, char** argv) {
     LOG(INFO) << "Disabling Kernel Method";
     rf_config.set_kernel_method(false);
   }
+
+  
 
   if (absl::GetFlag(FLAGS_enable_honest)) {
     LOG(INFO) << "Enabling Honest Forest";
@@ -178,23 +191,6 @@ int main(int argc, char** argv) {
   // The effective evaluation 
   ydf::utils::RandomEngine rnd;
   const auto evaluation = model->Evaluate(test_dataset, {}, &rnd);
-
-  // Save the raw evaluation 
-  std::string evaluation_path = file::JoinPath(output_dir, "evaluation.pbtxt");
-  QCHECK_OK(file::SetTextProto(evaluation_path, evaluation, file::Defaults()));
-
-  // Test engine
-  auto engine_or = model->BuildFastEngine();
-  LOG(INFO) << "Can fast engine be used: " << engine_or.ok();
-
-
-  // Save the evaluation in a text file 
-  std::string evaluation_report = ydf::metric::TextReport(evaluation).value();
-  QCHECK_OK(file::SetContent(absl::StrCat(evaluation_path, ".txt"),
-                             evaluation_report));
-  LOG(INFO) << "Evaluation:\n" << evaluation_report;
-
-  LOG(INFO) << "The results are available in " << output_dir;
 
   return 0;
 }
