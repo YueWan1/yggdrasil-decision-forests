@@ -814,6 +814,8 @@ IsolationForestLearner::GetGenericHyperParameterSpecification() const {
       decision_tree::kHParamNumericalVectorSequenceEnableCloserThanConditions,
       decision_tree::
           kHParamNumericalVectorSequenceEnableProjectedMoreThanConditions,
+      decision_tree::kHParamRandomCategoricalNumTrialExponent,
+      decision_tree::kHParamRandomCategoricalMaxNumTrials,
   };
 
   ASSIGN_OR_RETURN(auto hparam_def,
@@ -936,7 +938,7 @@ IsolationForestLearner::TrainWithStatusImpl(
       pool.Schedule([&train_dataset, &model, &config, tree_idx, &global_status,
                      &global_mutex, seed = global_random()]() {
         {
-          utils::concurrency::MutexLock lock(&global_mutex);
+          utils::concurrency::MutexLock lock(global_mutex);
           if (!global_status.ok()) {
             return;
           }
@@ -952,7 +954,7 @@ IsolationForestLearner::TrainWithStatusImpl(
             GrowTree(config, train_dataset, absl::MakeSpan(selected_examples),
                      &local_random);
         if (!tree_or.ok()) {
-          utils::concurrency::MutexLock lock(&global_mutex);
+          utils::concurrency::MutexLock lock(global_mutex);
           global_status.Update(tree_or.status());
           return;
         }

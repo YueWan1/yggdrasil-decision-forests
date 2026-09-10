@@ -64,6 +64,14 @@ namespace metric {
 
 namespace {
 
+// Returns the error of a prediction in log-space. Both arguments must be
+// non-negative.
+double ComputeLogError(double pred, double ground_truth) {
+  DCHECK_GE(ground_truth, 0);
+  DCHECK_GE(pred, 0);
+  return std::log1p(pred) - std::log1p(ground_truth);
+}
+
 // Compute the AUC (area under the curve) of the ROC curve.
 double computeAUC(const google::protobuf::RepeatedPtrField<proto::Roc::Point>& curve) {
   double auc = 0.0;
@@ -121,6 +129,62 @@ int GreatestPredictionIndex(
     }
   }
   return max_idx;
+}
+
+template <bool use_weights>
+void MSEImp(const absl::Span<const float> labels,
+            const absl::Span<const float> predictions,
+            const absl::Span<const float> weights, size_t begin_example_idx,
+            size_t end_example_idx, double* __restrict sum_sq_err,
+            double* __restrict sum_weights) {
+  for (size_t example_idx = begin_example_idx; example_idx < end_example_idx;
+       example_idx++) {
+    const float label = labels[example_idx];
+    const float prediction = predictions[example_idx];
+    if constexpr (use_weights) {
+      const float weight = weights[example_idx];
+      *sum_weights += weight;
+      // Loss:
+      //   (label - prediction)^2
+      *sum_sq_err += weight * (label - prediction) * (label - prediction);
+    } else {
+      *sum_sq_err += (label - prediction) * (label - prediction);
+    }
+  }
+}
+
+template <bool use_weights>
+absl::Status MSLEImp(const absl::Span<const float> labels,
+                     const absl::Span<const float> predictions,
+                     const absl::Span<const float> weights,
+                     size_t begin_example_idx, size_t end_example_idx,
+                     double* __restrict sum_sq_log_err,
+                     double* __restrict sum_weights) {
+  for (size_t example_idx = begin_example_idx; example_idx < end_example_idx;
+       example_idx++) {
+    const float label = labels[example_idx];
+    if (ABSL_PREDICT_FALSE(label < 0)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Ground truth label must be non-negative for MSLE "
+                       "computation, but got ",
+                       label));
+    }
+    float prediction = predictions[example_idx];
+    if (ABSL_PREDICT_FALSE(prediction < 0)) {
+      prediction = 0.0;
+      LOG_FIRST_N(INFO, 1) << "Got negative prediction " << prediction
+                           << ", set to 0";
+    }
+    const float log_err = ComputeLogError(prediction, label);
+    if constexpr (use_weights) {
+      const float weight = weights[example_idx];
+      *sum_weights += weight;
+      *sum_sq_log_err += weight * log_err * log_err;
+    } else {
+      *sum_sq_log_err += log_err * log_err;
+    }
+  }
+  return absl::OkStatus();
 }
 
 // Extract the lower and upper bounds from the samples (using the "getter") and
@@ -401,6 +465,10 @@ void MergeEvaluationClassification(
 void MergeEvaluationRegression(const proto::EvaluationResults::Regression& src,
                                proto::EvaluationResults::Regression* dst) {
   dst->set_sum_square_error(dst->sum_square_error() + src.sum_square_error());
+  if (src.has_sum_square_log_error()) {
+    dst->set_sum_square_log_error(dst->sum_square_log_error() +
+                                  src.sum_square_log_error());
+  }
   dst->set_sum_abs_error(dst->sum_abs_error() + src.sum_abs_error());
   dst->set_sum_label(dst->sum_label() + src.sum_label());
   dst->set_sum_square_label(dst->sum_square_label() + src.sum_square_label());
@@ -860,6 +928,9 @@ absl::Status InitializeEvaluation(const proto::EvaluationOptions& option,
             dataset::proto::ColumnType_Name(label_column.type())));
       }
       eval->mutable_regression();
+      if (option.regression().enable_msle()) {
+        eval->mutable_regression()->set_sum_square_log_error(0);
+      }
       break;
     case model::proto::Task::RANKING:
       if (label_column.type() != dataset::proto::ColumnType::NUMERICAL) {
@@ -918,10 +989,17 @@ absl::Status AddPrediction(const proto::EvaluationOptions& option,
       auto* eval_cls = eval->mutable_classification();
       const auto& pred_cls = pred.classification();
       STATUS_CHECK(pred_cls.has_ground_truth());
+      auto* confusion_matrix = eval_cls->mutable_confusion();
+      const auto& ground_truth = pred_cls.ground_truth();
+      STATUS_CHECK(ground_truth < confusion_matrix->nrow());
+      STATUS_CHECK(ground_truth >= 0);
+      const auto& pred_value = pred_cls.value();
+      STATUS_CHECK(pred_value < confusion_matrix->ncol());
+      STATUS_CHECK(pred_value >= 0);
+
       // Confusion matrix.
-      utils::AddToConfusionMatrixProto(pred_cls.ground_truth(),
-                                       pred_cls.value(), pred.weight(),
-                                       eval_cls->mutable_confusion());
+      utils::AddToConfusionMatrixProto(ground_truth, pred_value, pred.weight(),
+                                       confusion_matrix);
       // Log-Loss
       if (pred_cls.has_distribution()) {
         auto pred_prob_true_class =
@@ -948,6 +1026,26 @@ absl::Status AddPrediction(const proto::EvaluationOptions& option,
       const float error = pred_reg.value() - pred_reg.ground_truth();
       eval_reg->set_sum_square_error(eval_reg->sum_square_error() +
                                      error * error * pred.weight());
+      // MSLE
+      if (option.regression().enable_msle()) {
+        auto pred_val = pred_reg.value();
+        const auto ground_truth = pred_reg.ground_truth();
+        if (ABSL_PREDICT_FALSE(ground_truth < 0)) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Ground truth label must be non-negative for MSLE "
+                           "computation, but got ",
+                           ground_truth));
+        }
+        if (ABSL_PREDICT_FALSE(pred_val < 0)) {
+          pred_val = 0.f;
+          LOG_FIRST_N(INFO, 1)
+              << "Got negative prediction " << pred << ", set to 0";
+        }
+        const float log_error = ComputeLogError(pred_val, ground_truth);
+        eval_reg->set_sum_square_log_error(eval_reg->sum_square_log_error() +
+                                           log_error * log_error *
+                                               pred.weight());
+      }
       eval_reg->set_sum_abs_error(eval_reg->sum_abs_error() +
                                   std::abs(error) * pred.weight());
       eval_reg->set_sum_label(eval_reg->sum_label() +
@@ -993,9 +1091,8 @@ absl::Status ChangePredictionType(model::proto::Task src_task,
                                   model::proto::Prediction* dst_pred) {
   if (src_task == dst_task) {
     *dst_pred = src_pred;
-  }
-  // Source is CLASSIFICATION
-  else if (src_task == model::proto::Task::CLASSIFICATION) {
+  } else if (src_task == model::proto::Task::CLASSIFICATION) {
+    // Source is CLASSIFICATION
     if (dst_task == model::proto::Task::RANKING) {
       if (src_pred.classification().distribution().counts_size() != 3) {
         STATUS_FATAL(
@@ -1015,9 +1112,8 @@ absl::Status ChangePredictionType(model::proto::Task src_task,
           src_pred.classification().distribution().counts(2) /
           src_pred.classification().distribution().sum());
     }
-  }
-  // Source is REGRESSION
-  else if (src_task == model::proto::Task::REGRESSION) {
+  } else if (src_task == model::proto::Task::REGRESSION) {
+    // Source is REGRESSION
     float value = src_pred.regression().value();
     if (dst_task == model::proto::Task::RANKING) {
       dst_pred->mutable_ranking()->set_relevance(value);
@@ -1031,15 +1127,13 @@ absl::Status ChangePredictionType(model::proto::Task src_task,
       dst_clas->mutable_distribution()->add_counts(1.f - value);
       dst_clas->mutable_distribution()->add_counts(value);
     }
-  }
-  // Source is RANKING
-  else if (src_task == model::proto::Task::RANKING &&
-           dst_task == model::proto::Task::REGRESSION) {
+  } else if (src_task == model::proto::Task::RANKING &&
+             dst_task == model::proto::Task::REGRESSION) {
+    // Source is RANKING
     const float value = src_pred.ranking().relevance();
     dst_pred->mutable_regression()->set_value(value);
-  }
-  // Source is ANOMALY_DETECTION
-  else if (src_task == model::proto::Task::ANOMALY_DETECTION) {
+  } else if (src_task == model::proto::Task::ANOMALY_DETECTION) {
+    // Source is ANOMALY_DETECTION
     float value = src_pred.anomaly_detection().value();
     if (dst_task == model::proto::Task::CLASSIFICATION) {
       value = std::clamp(value, 0.f, 1.f);
@@ -1054,9 +1148,8 @@ absl::Status ChangePredictionType(model::proto::Task src_task,
     } else if (dst_task == model::proto::Task::RANKING) {
       dst_pred->mutable_ranking()->set_relevance(value);
     }
-  }
-  // Non supported
-  else {
+  } else {
+    // Non supported
     STATUS_FATALS("Non supported override of task from ",
                   model::proto::Task_Name(src_task), " to ",
                   model::proto::Task_Name(dst_task));
@@ -1159,11 +1252,43 @@ float Loss(const proto::EvaluationResults& eval) {
   }
 }
 
+float MSE(const proto::EvaluationResults& eval) {
+  if (eval.count_predictions() == 0) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  return eval.regression().sum_square_error() / eval.count_predictions();
+}
+
 float RMSE(const proto::EvaluationResults& eval) {
   if (eval.count_predictions() == 0) {
     return std::numeric_limits<float>::quiet_NaN();
   }
   return sqrt(eval.regression().sum_square_error() / eval.count_predictions());
+}
+
+absl::StatusOr<float> MSLE(const proto::EvaluationResults& eval) {
+  if (!eval.regression().has_sum_square_log_error()) {
+    return absl::InvalidArgumentError(
+        "MSLE was not computed. Make sure enable_msle is set in "
+        "EvaluationOptions.");
+  }
+  if (eval.count_predictions() == 0) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  return eval.regression().sum_square_log_error() / eval.count_predictions();
+}
+
+absl::StatusOr<float> RMSLE(const proto::EvaluationResults& eval) {
+  if (!eval.regression().has_sum_square_log_error()) {
+    return absl::InvalidArgumentError(
+        "RMSLE was not computed. Make sure enable_msle is set in "
+        "EvaluationOptions.");
+  }
+  if (eval.count_predictions() == 0) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  return sqrt(eval.regression().sum_square_log_error() /
+              eval.count_predictions());
 }
 
 float MAE(const proto::EvaluationResults& eval) {
@@ -1780,6 +1905,16 @@ absl::StatusOr<double> GetMetricRegression(
       return RMSE(evaluation);
     case proto::MetricAccessor::Regression::kMae:
       return MAE(evaluation);
+    case proto::MetricAccessor::Regression::kMse:
+      return MSE(evaluation);
+    case proto::MetricAccessor::Regression::kMsle: {
+      ASSIGN_OR_RETURN(const float msle, MSLE(evaluation));
+      return msle;
+    }
+    case proto::MetricAccessor::Regression::kRmsle: {
+      ASSIGN_OR_RETURN(const float rmsle, RMSLE(evaluation));
+      return rmsle;
+    }
     default:
       return absl::InvalidArgumentError("Not implemented");
   }
@@ -1892,7 +2027,26 @@ absl::StatusOr<bool> HigherIsBetter(const proto::MetricAccessor& metric) {
         case proto::MetricAccessor::Classification::kLogloss:
           return false;
         case proto::MetricAccessor::Classification::kOneVsOther:
-          return true;
+          switch (metric.classification().one_vs_other().Type_case()) {
+            case proto::MetricAccessor::Classification::OneVsOther::kAuc:
+            case proto::MetricAccessor::Classification::OneVsOther::kPrAuc:
+            case proto::MetricAccessor::Classification::OneVsOther::kAp:
+            case proto::MetricAccessor::Classification::OneVsOther::
+                kPrecisionAtRecall:
+            case proto::MetricAccessor::Classification::OneVsOther::
+                kRecallAtPrecision:
+            case proto::MetricAccessor::Classification::OneVsOther::
+                kPrecisionAtVolume:
+            case proto::MetricAccessor::Classification::OneVsOther::
+                kRecallAtFalsePositiveRate:
+              return true;
+            case proto::MetricAccessor::Classification::OneVsOther::
+                kFalsePositiveRateAtRecall:
+              return false;
+            default:
+              break;
+          }
+          break;
         default:
           break;
       }
@@ -1901,6 +2055,10 @@ absl::StatusOr<bool> HigherIsBetter(const proto::MetricAccessor& metric) {
     case proto::MetricAccessor::kRegression:
       switch (metric.regression().Type_case()) {
         case proto::MetricAccessor::Regression::kRmse:
+        case proto::MetricAccessor::Regression::kMae:
+        case proto::MetricAccessor::Regression::kMse:
+        case proto::MetricAccessor::Regression::kMsle:
+        case proto::MetricAccessor::Regression::kRmsle:
           return false;
         default:
           break;
@@ -1911,12 +2069,22 @@ absl::StatusOr<bool> HigherIsBetter(const proto::MetricAccessor& metric) {
       return false;
 
     case proto::MetricAccessor::kRanking:
-      return true;
+      switch (metric.ranking().Type_case()) {
+        case proto::MetricAccessor::Ranking::kNdcg:
+        case proto::MetricAccessor::Ranking::kMrr:
+        case proto::MetricAccessor::Ranking::kMap:
+          return true;
+        default:
+          break;
+      }
+      break;
 
     case proto::MetricAccessor::kUplift:
       switch (metric.uplift().type_case()) {
         case proto::MetricAccessor::Uplift::kQini:
           return true;
+        case proto::MetricAccessor::Uplift::kCateCalibration:
+          return false;
         default:
           break;
       }
@@ -2095,41 +2263,23 @@ absl::StatusOr<double> MAE(const absl::Span<const float> labels,
   }
 }
 
-template <bool use_weights>
-void RMSEImp(const absl::Span<const float> labels,
-             const absl::Span<const float> predictions,
-             const absl::Span<const float> weights, size_t begin_example_idx,
-             size_t end_example_idx, double* __restrict sum_sq_err,
-             double* __restrict sum_weights) {
-  for (size_t example_idx = begin_example_idx; example_idx < end_example_idx;
-       example_idx++) {
-    const float label = labels[example_idx];
-    const float prediction = predictions[example_idx];
-    if constexpr (use_weights) {
-      const float weight = weights[example_idx];
-      *sum_weights += weight;
-      // Loss:
-      //   (label - prediction)^2
-      *sum_sq_err += weight * (label - prediction) * (label - prediction);
-    } else {
-      *sum_sq_err += (label - prediction) * (label - prediction);
-    }
+absl::StatusOr<double> MSE(const absl::Span<const float> labels,
+                           const absl::Span<const float> predictions,
+                           const absl::Span<const float> weights,
+                           utils::concurrency::ThreadPool* thread_pool) {
+  STATUS_CHECK_EQ(labels.size(), predictions.size());
+  if (!weights.empty()) {
+    STATUS_CHECK_EQ(labels.size(), weights.size());
   }
-}
-
-absl::StatusOr<double> RMSE(const absl::Span<const float> labels,
-                            const absl::Span<const float> predictions,
-                            const absl::Span<const float> weights,
-                            utils::concurrency::ThreadPool* thread_pool) {
   double sum_sq_err = 0;
   double sum_weights = 0;
   if (thread_pool == nullptr) {
     if (weights.empty()) {
-      RMSEImp<false>(labels, predictions, weights, 0, labels.size(),
-                     &sum_sq_err, &sum_weights);
-    } else {
-      RMSEImp<true>(labels, predictions, weights, 0, labels.size(), &sum_sq_err,
+      MSEImp<false>(labels, predictions, weights, 0, labels.size(), &sum_sq_err,
                     &sum_weights);
+    } else {
+      MSEImp<true>(labels, predictions, weights, 0, labels.size(), &sum_sq_err,
+                   &sum_weights);
     }
   } else {
     const auto num_threads = thread_pool->num_threads();
@@ -2146,11 +2296,11 @@ absl::StatusOr<double> RMSE(const absl::Span<const float> labels,
             size_t block_idx, size_t begin_idx, size_t end_idx) -> void {
           auto& block = per_threads[block_idx];
           if (weights.empty()) {
-            RMSEImp<false>(labels, predictions, weights, begin_idx, end_idx,
-                           &block.sum_sq_err, &block.sum_weights);
-          } else {
-            RMSEImp<true>(labels, predictions, weights, begin_idx, end_idx,
+            MSEImp<false>(labels, predictions, weights, begin_idx, end_idx,
                           &block.sum_sq_err, &block.sum_weights);
+          } else {
+            MSEImp<true>(labels, predictions, weights, begin_idx, end_idx,
+                         &block.sum_sq_err, &block.sum_weights);
           }
         });
 
@@ -2164,7 +2314,7 @@ absl::StatusOr<double> RMSE(const absl::Span<const float> labels,
   }
 
   if (sum_weights > 0) {
-    return sqrt(sum_sq_err / sum_weights);
+    return sum_sq_err / sum_weights;
   } else {
     return std::numeric_limits<double>::quiet_NaN();
   }
@@ -2172,24 +2322,83 @@ absl::StatusOr<double> RMSE(const absl::Span<const float> labels,
 
 absl::StatusOr<double> RMSE(const absl::Span<const float> labels,
                             const absl::Span<const float> predictions,
+                            const absl::Span<const float> weights,
+                            utils::concurrency::ThreadPool* thread_pool) {
+  ASSIGN_OR_RETURN(const auto mse,
+                   MSE(labels, predictions, weights, thread_pool));
+  return sqrt(mse);
+}
+
+absl::StatusOr<double> MSLE(const absl::Span<const float> labels,
+                            const absl::Span<const float> predictions,
+                            const absl::Span<const float> weights,
                             utils::concurrency::ThreadPool* thread_pool) {
   STATUS_CHECK_EQ(labels.size(), predictions.size());
-
-  double sum_loss = 0;
-  for (size_t example_idx = 0; example_idx < labels.size(); example_idx++) {
-    const float label = labels[example_idx];
-    const float prediction = predictions[example_idx];
-    // Loss:
-    //   (label - prediction)^2
-    sum_loss += (label - prediction) * (label - prediction);
+  if (!weights.empty()) {
+    STATUS_CHECK_EQ(labels.size(), weights.size());
   }
-  const auto sum_weights = labels.size();
+  double sum_sq_log_err = 0;
+  double sum_weights = 0;
+  if (thread_pool == nullptr) {
+    if (weights.empty()) {
+      RETURN_IF_ERROR(MSLEImp<false>(labels, predictions, weights, 0,
+                                     labels.size(), &sum_sq_log_err,
+                                     &sum_weights));
+    } else {
+      RETURN_IF_ERROR(MSLEImp<true>(labels, predictions, weights, 0,
+                                    labels.size(), &sum_sq_log_err,
+                                    &sum_weights));
+    }
+  } else {
+    const auto num_threads = thread_pool->num_threads();
+
+    struct PerThread {
+      double sum_sq_log_err = 0;
+      double sum_weights = 0;
+    };
+    std::vector<PerThread> per_threads(num_threads);
+
+    RETURN_IF_ERROR(utils::concurrency::ConcurrentForLoopWithStatus(
+        num_threads, thread_pool, labels.size(),
+        [&labels, &predictions, &per_threads, &weights](
+            size_t block_idx, size_t begin_idx,
+            size_t end_idx) -> absl::Status {
+          auto& block = per_threads[block_idx];
+          absl::Status status;
+          if (weights.empty()) {
+            return MSLEImp<false>(labels, predictions, weights, begin_idx,
+                                  end_idx, &block.sum_sq_log_err,
+                                  &block.sum_weights);
+          } else {
+            return MSLEImp<true>(labels, predictions, weights, begin_idx,
+                                 end_idx, &block.sum_sq_log_err,
+                                 &block.sum_weights);
+          }
+        }));
+
+    for (const auto& block : per_threads) {
+      sum_sq_log_err += block.sum_sq_log_err;
+      sum_weights += block.sum_weights;
+    }
+  }
+  if (weights.empty()) {
+    sum_weights = labels.size();
+  }
 
   if (sum_weights > 0) {
-    return sqrt(sum_loss / sum_weights);
+    return sum_sq_log_err / sum_weights;
   } else {
     return std::numeric_limits<double>::quiet_NaN();
   }
+}
+
+absl::StatusOr<double> RMSLE(const absl::Span<const float> labels,
+                             const absl::Span<const float> predictions,
+                             const absl::Span<const float> weights,
+                             utils::concurrency::ThreadPool* thread_pool) {
+  ASSIGN_OR_RETURN(const auto msle,
+                   MSLE(labels, predictions, weights, thread_pool));
+  return sqrt(msle);
 }
 
 }  // namespace metric

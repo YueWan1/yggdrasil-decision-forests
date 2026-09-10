@@ -17,14 +17,17 @@
 
 #include <pybind11/numpy.h>
 
+#include <cmath>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "yggdrasil_decision_forests/model/abstract_model.h"
+#include "yggdrasil_decision_forests/model/abstract_model.pb.h"
 #include "yggdrasil_decision_forests/model/gradient_boosted_trees/gradient_boosted_trees.h"
 
 namespace yggdrasil_decision_forests::port::python {
@@ -67,6 +70,25 @@ void GradientBoostedTreesCCModel::set_initial_predictions(
   gbt_model_->set_initial_predictions(std::move(std_values));
 }
 
+absl::StatusOr<bool> GradientBoostedTreesCCModel::output_logits() const {
+  if (gbt_model_->task() != model::proto::CLASSIFICATION) {
+    return absl::InvalidArgumentError(
+        "output_logits is only supported for classification tasks.");
+  }
+  return gbt_model_->output_logits();
+}
+
+absl::Status GradientBoostedTreesCCModel::set_output_logits(
+    const bool output_logits) {
+  if (gbt_model_->task() != model::proto::CLASSIFICATION) {
+    return absl::InvalidArgumentError(
+        "output_logits is only supported for classification tasks.");
+  }
+  invalidate_engine_ = true;
+  gbt_model_->set_output_logits(output_logits);
+  return absl::OkStatus();
+}
+
 std::vector<GBTCCTrainingLogEntry> GradientBoostedTreesCCModel::training_logs()
     const {
   std::vector<GBTCCTrainingLogEntry> logs;
@@ -74,21 +96,31 @@ std::vector<GBTCCTrainingLogEntry> GradientBoostedTreesCCModel::training_logs()
   const auto& label_col_spec = gbt_model_->label_col_spec();
   logs.reserve(training_logs.entries_size());
   for (const auto& entry : training_logs.entries()) {
-    const auto& validation_evaluation =
-        model::gradient_boosted_trees::internal::TrainingLogToEvaluationResults(
-            entry, training_logs, gbt_model_->task(), label_col_spec,
-            gbt_model_->loss_config(), gbt_model_->GetLossName(),
-            model::gradient_boosted_trees::internal::TrainingLogEvaluationSet::
-                kValidation);
-    const auto& training_evaluation =
+    const auto training_evaluation =
         model::gradient_boosted_trees::internal::TrainingLogToEvaluationResults(
             entry, training_logs, gbt_model_->task(), label_col_spec,
             gbt_model_->loss_config(), gbt_model_->GetLossName(),
             model::gradient_boosted_trees::internal::TrainingLogEvaluationSet::
                 kTraining);
+    metric::proto::EvaluationResults validation_evaluation;
+    if (!std::isnan(gbt_model_->validation_loss())) {
+      validation_evaluation = model::gradient_boosted_trees::internal::
+          TrainingLogToEvaluationResults(
+              entry, training_logs, gbt_model_->task(), label_col_spec,
+              gbt_model_->loss_config(), gbt_model_->GetLossName(),
+              model::gradient_boosted_trees::internal::
+                  TrainingLogEvaluationSet::kValidation);
+    }
+
+    std::optional<float> time;
+    if (entry.has_time()) {
+      time = entry.time();
+    }
+
     logs.push_back({.iteration = entry.number_of_trees(),
                     .validation_evaluation = validation_evaluation,
-                    .training_evaluation = training_evaluation});
+                    .training_evaluation = training_evaluation,
+                    .time = time});
   }
   return logs;
 }

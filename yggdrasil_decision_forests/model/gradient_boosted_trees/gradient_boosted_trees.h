@@ -20,6 +20,7 @@
 
 #include <stddef.h>
 
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -75,13 +76,6 @@ class GradientBoostedTreesModel : public AbstractModel,
                                 dataset::VerticalDataset::row_t row_idx,
                                 absl::Span<int32_t> leaves) const override;
 
-  void Predict(const dataset::VerticalDataset& dataset,
-               dataset::VerticalDataset::row_t row_idx,
-               model::proto::Prediction* prediction) const override;
-
-  void Predict(const dataset::proto::Example& example,
-               model::proto::Prediction* prediction) const override;
-
   // Number of nodes in the model.
   int64_t NumNodes() const;
 
@@ -116,6 +110,10 @@ class GradientBoostedTreesModel : public AbstractModel,
   int num_trees_per_iter() const { return num_trees_per_iter_; }
   void set_num_trees_per_iter(const int num_trees_per_iter) {
     num_trees_per_iter_ = num_trees_per_iter;
+  }
+
+  std::optional<bool> early_stopping_triggered() const {
+    return early_stopping_triggered_;
   }
 
   const proto::TrainingLogs& training_logs() const { return training_logs_; }
@@ -189,6 +187,19 @@ class GradientBoostedTreesModel : public AbstractModel,
 
   std::string DebugCompare(const AbstractModel& other) const override;
 
+  // Sets whether early stopping was triggered during training.
+  void set_early_stopping_triggered(bool early_stopping_triggered) {
+    early_stopping_triggered_ = early_stopping_triggered;
+  }
+
+ protected:
+  void PredictImpl(const dataset::VerticalDataset& dataset,
+                   dataset::VerticalDataset::row_t row_idx,
+                   model::proto::Prediction* prediction) const override;
+
+  void PredictImpl(const dataset::proto::Example& example,
+                   model::proto::Prediction* prediction) const override;
+
  private:
   void PredictClassification(const dataset::VerticalDataset& dataset,
                              dataset::VerticalDataset::row_t row_idx,
@@ -246,7 +257,7 @@ class GradientBoostedTreesModel : public AbstractModel,
   float validation_loss_ = std::numeric_limits<float>::quiet_NaN();
 
   // Number of trees extracted at each gradient boosting operation.
-  int num_trees_per_iter_;
+  int num_trees_per_iter_ = 1;
 
   // Evaluation metrics and other meta-data computed during training.
   proto::TrainingLogs training_logs_;
@@ -277,6 +288,11 @@ class GradientBoostedTreesModel : public AbstractModel,
   proto::Loss loss_ = proto::Loss::DEFAULT;
   // Options of the loss.
   proto::LossConfiguration loss_config_;
+
+  // If true, early stopping was triggered during training.
+  // If not set, the model was either trained before this field was added
+  // or this information was missing from the loaded model header.
+  std::optional<bool> early_stopping_triggered_ = std::nullopt;
 };
 
 namespace internal {
@@ -292,8 +308,8 @@ metric::proto::EvaluationResults TrainingLogToEvaluationResults(
     const proto::TrainingLogs::Entry& log_entry,
     const proto::TrainingLogs& training_logs, const model::proto::Task& task,
     const dataset::proto::Column& label_col_spec,
-    const proto::LossConfiguration& loss_config,
-    const absl::string_view loss_name, TrainingLogEvaluationSet eval_set);
+    const proto::LossConfiguration& loss_config, const std::string& loss_name,
+    TrainingLogEvaluationSet eval_set);
 
 }  // namespace internal
 

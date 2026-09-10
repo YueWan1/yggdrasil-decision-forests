@@ -16,17 +16,29 @@
 #ifndef YGGDRASIL_DECISION_FORESTS_LEARNER_DISTRIBUTED_GRADIENT_BOOSTED_TREES_WORKER_H_
 #define YGGDRASIL_DECISION_FORESTS_LEARNER_DISTRIBUTED_GRADIENT_BOOSTED_TREES_WORKER_H_
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "yggdrasil_decision_forests/dataset/vertical_dataset.h"
+#include "yggdrasil_decision_forests/learner/distributed_decision_tree/dataset_cache/dataset_cache_reader.h"
+#include "yggdrasil_decision_forests/learner/distributed_decision_tree/label_accessor.h"
+#include "yggdrasil_decision_forests/learner/distributed_decision_tree/splitter.h"
 #include "yggdrasil_decision_forests/learner/distributed_decision_tree/training.h"
 #include "yggdrasil_decision_forests/learner/distributed_gradient_boosted_trees/worker.pb.h"
 #include "yggdrasil_decision_forests/learner/gradient_boosted_trees/loss/loss_interface.h"
-#include "yggdrasil_decision_forests/learner/gradient_boosted_trees/loss/loss_library.h"
 #include "yggdrasil_decision_forests/serving/fast_engine.h"
 #include "yggdrasil_decision_forests/utils/concurrency.h"
 #include "yggdrasil_decision_forests/utils/distribute/core.h"
+#include "yggdrasil_decision_forests/utils/random.h"
+#include "yggdrasil_decision_forests/utils/synchronization_primitives.h"
 
 namespace yggdrasil_decision_forests {
 namespace model {
@@ -106,7 +118,7 @@ class DistributedGradientBoostedTreesWorker
   // generated according to the iteration index. For example, the failure on
   // request #4 and worker #2 might be generated on iteration #16 (not exact
   // values). Used for testing.
-  void MaybeSimulateFailure(proto::WorkerRequest::TypeCase request_type);
+  void MaybeSimulateFailure(const proto::WorkerRequest& request);
 
   // The following methods with stage names are defined in "worker.proto".
 
@@ -162,7 +174,12 @@ class DistributedGradientBoostedTreesWorker
   // End of stage names.
 
   // Change the features owned by the worker.
-  absl::Status UpdateOwnedFeatures(std::vector<int> features);
+  //
+  // `future_load_features` are features that will be loaded on the worker in
+  // the future and that should not be loaded or unloaded
+  absl::Status UpdateOwnedFeatures(
+      std::vector<int> features,
+      const absl::flat_hash_set<int>& future_load_features = {});
 
   // Initiate the pre-loading of features for future usage.
   //

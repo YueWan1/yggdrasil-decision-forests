@@ -52,6 +52,7 @@
 #include "yggdrasil_decision_forests/model/abstract_model.h"
 #include "yggdrasil_decision_forests/model/hyperparameter.pb.h"
 #include "ydf/learner/custom_loss.h"
+#include "ydf/learner/custom_metric.h"
 #include "ydf/model/model.h"
 #include "ydf/model/model_wrapper.h"
 #include "ydf/utils/status_casters.h"
@@ -78,10 +79,8 @@ void (*existing_signal_handler_alarm)(int) = nullptr;
 
 void ReceiveSignal(int signal) {
   if (!stop_training) {
-    LOG(INFO) << "Interrupting YDF training.";
     stop_training = true;
   } else {
-    LOG(INFO) << "Passing signal " << signal << ".";
     // Pass the signal to any existing handler.
     if (signal == SIGINT && existing_signal_handler_int) {
       existing_signal_handler_int(signal);
@@ -198,9 +197,13 @@ class GenericCCLearner {
     create_dataspec_config.stop = learner_->stop_training_trigger();
 
     EnableUserInterruption();
-    const auto status = dataset::CreateDataSpecWithStatus(
-        typed_dataset_path, false, data_spec_guide, &generated_data_spec,
-        create_dataspec_config);
+    absl::Status status;
+    {
+      py::gil_scoped_release release;
+      status = dataset::CreateDataSpecWithStatus(
+          typed_dataset_path, false, data_spec_guide, &generated_data_spec,
+          create_dataspec_config);
+    }
     RETURN_IF_ERROR(DisableUserInterruption());
     RETURN_IF_ERROR(status);
 
@@ -224,8 +227,8 @@ class GenericCCLearner {
           learner_.get());
       if (gbt_learner != nullptr && gbt_learner->HasCustomLossFunctions()) {
         return absl::InvalidArgumentError(
-            "When using custom losses, learner evaluation cannot be "
-            "use parallel evaluations. Set parallel_evaluations=1.");
+            "When using custom losses, learner evaluation cannot use "
+            "parallel evaluations. Set parallel_evaluations=1.");
       }
     }
     EnableUserInterruption();
@@ -260,7 +263,8 @@ absl::StatusOr<std::unique_ptr<GenericCCLearner>> GetLearner(
     const std::optional<model::proto::TrainingConfig>& extra_training_config,
     const model::proto::GenericHyperParameters& hyperparameters,
     const model::proto::DeploymentConfig& deployment_config,
-    const CCCustomLoss& custom_loss = std::monostate()) {
+    const CCCustomLoss& custom_loss = std::monostate(),
+    const std::vector<CCCustomMetric>& custom_metrics = {}) {
   std::unique_ptr<model::AbstractLearner> learner_ptr;
   RETURN_IF_ERROR(
       model::GetLearner(train_config, &learner_ptr, deployment_config));
@@ -270,6 +274,7 @@ absl::StatusOr<std::unique_ptr<GenericCCLearner>> GetLearner(
         extra_training_config.value());
   }
   RETURN_IF_ERROR(ApplyCustomLoss(custom_loss, learner_ptr.get()));
+  RETURN_IF_ERROR(ApplyCustomMetric(custom_metrics, learner_ptr.get()));
 
   learner_ptr->set_stop_training_trigger(&stop_training);
   return std::make_unique<GenericCCLearner>(std::move(learner_ptr));
@@ -292,7 +297,10 @@ absl::StatusOr<std::unordered_set<std::string>> GetInvalidHyperparameters(
   std::unordered_set<std::string> invalid_hyperparameters;
   for (const auto& explicit_hp : explicit_hp_names) {
     auto it_field = hp_spec.fields().find(explicit_hp);
-    DCHECK(it_field != hp_spec.fields().end());
+    if (it_field == hp_spec.fields().end()) {
+      return absl::InvalidArgumentError(
+          absl::Substitute("Unknown hyperparameter: $0", explicit_hp));
+    }
     auto& other_hyperparameters =
         it_field->second.mutual_exclusive().other_parameters();
     if (invalid_hyperparameters.find(explicit_hp) !=
@@ -322,24 +330,32 @@ void init_learner(py::module_& m) {
   m.def("GetLearner", WithStatusOr(GetLearner), py::arg("train_config"),
         py::arg("extra_training_config"), py::arg("hyperparameters"),
         py::arg("deployment_config"),
-        py::arg("custom_loss").noconvert() = std::monostate());
+        py::arg("custom_loss").noconvert() = std::monostate(),
+        py::arg("custom_metrics") = std::vector<CCCustomMetric>());
   m.def("GetInvalidHyperparameters", WithStatusOr(GetInvalidHyperparameters),
         py::arg("hp_names"), py::arg("explicit_hp_names"),
         py::arg("train_config"), py::arg("deployment_config"));
   m.def("ValidateHyperparameters", WithStatus(ValidateHyperparameters),
-        py::arg("hyperparamters"), py::arg("train_config"),
+        py::arg("hyperparameters"), py::arg("train_config"),
         py::arg("deployment_config"));
   py::class_<CCRegressionLoss>(m, "CCRegressionLoss")
       .def(py::init<CCRegressionLoss::InitFunc, CCRegressionLoss::LossFunc,
-                    CCRegressionLoss::GradFunc, bool>());
+                    CCRegressionLoss::GradFunc>());
   py::class_<CCBinaryClassificationLoss>(m, "CCBinaryClassificationLoss")
       .def(py::init<CCBinaryClassificationLoss::InitFunc,
                     CCBinaryClassificationLoss::LossFunc,
-                    CCBinaryClassificationLoss::GradFunc, bool>());
+                    CCBinaryClassificationLoss::GradFunc>());
   py::class_<CCMultiClassificationLoss>(m, "CCMultiClassificationLoss")
       .def(py::init<CCMultiClassificationLoss::InitFunc,
                     CCMultiClassificationLoss::LossFunc,
-                    CCMultiClassificationLoss::GradFunc, bool>());
+                    CCMultiClassificationLoss::GradFunc>());
+  py::class_<CCBinaryClassificationMetric>(m, "CCBinaryClassificationMetric")
+      .def(py::init<std::string, CCBinaryClassificationMetric::MetricFunc>());
+  py::class_<CCMultiClassificationMetric>(m, "CCMultiClassificationMetric")
+      .def(py::init<std::string, CCMultiClassificationMetric::MetricFunc>());
+  py::class_<CCRegressionMetric>(m, "CCRegressionMetric")
+      .def(py::init<std::string, CCRegressionMetric::MetricFunc>());
+
   py::class_<GenericCCLearner>(m, "GenericCCLearner")
       .def("__repr__",
            [](const GenericCCLearner& a) {

@@ -555,8 +555,7 @@ class RandomForestLearnerTest(learner_test_utils.LearnerTest):
     learner = specialized_learners.RandomForestLearner(label="label")
     with self.assertRaisesRegex(
         test_utils.AbslInvalidArgumentError,
-        "The column 'label' is multi-dimensional \\(shape=\\(2, 2\\)\\) while"
-        " the model requires this column to be single-dimensional",
+        "The column 'label' is multi-dimensional",
     ):
       _ = learner.train(ds)
 
@@ -571,8 +570,7 @@ class RandomForestLearnerTest(learner_test_utils.LearnerTest):
     )
     with self.assertRaisesRegex(
         test_utils.AbslInvalidArgumentError,
-        "The column 'weight' is multi-dimensional \\(shape=\\(2, 2\\)\\) while"
-        " the model requires this column to be single-dimensional",
+        "The column 'weight' is multi-dimensional",
     ):
       _ = learner.train(ds)
 
@@ -741,7 +739,7 @@ class RandomForestLearnerTest(learner_test_utils.LearnerTest):
     })
     with self.assertRaisesRegex(
         ValueError,
-        r"Column 'feature' is expected to single-dimensional but it is"
+        r"Column 'feature' is expected to be single-dimensional but it is"
         r" multi-dimensional with shape 2.",
     ):
       _ = model.predict({
@@ -749,7 +747,7 @@ class RandomForestLearnerTest(learner_test_utils.LearnerTest):
       })
     with self.assertRaisesRegex(
         ValueError,
-        r"Column 'feature' is expected to single-dimensional but it is"
+        r"Column 'feature' is expected to be single-dimensional but it is"
         r" multi-dimensional with shape 1.",
     ):
       _ = model.predict({
@@ -883,8 +881,8 @@ class RandomForestLearnerTest(learner_test_utils.LearnerTest):
       if isinstance(node.condition, condition_type):
         return True
       return tree_contains_condition_type(
-          node.neg_child, condition_type
-      ) or tree_contains_condition_type(node.pos_child, condition_type)
+          node.neg_child, condition_type  # pyrefly: ignore[bad-argument-type]
+      ) or tree_contains_condition_type(node.pos_child, condition_type)  # pyrefly: ignore[bad-argument-type]
 
     def model_contains_condition_type(
         model: decision_forest_model.DecisionForestModel,

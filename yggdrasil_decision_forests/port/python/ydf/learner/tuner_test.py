@@ -17,11 +17,15 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 
+from yggdrasil_decision_forests.dataset import data_spec_pb2
 from yggdrasil_decision_forests.learner import abstract_learner_pb2
 from yggdrasil_decision_forests.learner.hyperparameters_optimizer import hyperparameters_optimizer_pb2
 from yggdrasil_decision_forests.learner.hyperparameters_optimizer.optimizers import random_pb2
 from yggdrasil_decision_forests.model import hyperparameter_pb2
+from ydf.dataset import dataspec
+from ydf.learner import specialized_learners
 from ydf.learner import tuner as tuner_lib
+from ydf.model import generic_model
 from ydf.utils import test_utils
 from yggdrasil_decision_forests.utils import fold_generator_pb2
 
@@ -305,6 +309,84 @@ class TunerTest(parameterized.TestCase):
 
     test_utils.assertProto2Equal(self, tuner.train_config, expected_proto)
 
+  def test_tuner_monotonic_gbt(self):
+    dataset = test_utils.load_datasets("adult")
+
+    tuner = tuner_lib.RandomSearchTuner(num_trials=5)
+    tuner.choice("num_candidate_attributes_ratio", [1.0, 0.8, 0.6])
+    tuner.choice("shrinkage", [0.05, 0.1, 0.2])
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="income",
+        tuner=tuner,
+        num_trees=10,
+        use_hessian_gain=True,
+        features=[
+            dataspec.Column("age", monotonic=+1),
+            dataspec.Column("hours_per_week", monotonic=-1),
+            dataspec.Column("education_num", monotonic=+1),
+        ],
+        include_all_columns=True,
+    )
+
+    model = learner.train(dataset.train_pd)
+    self.assertIsNotNone(model)
+    self.assertIsNotNone(model.hyperparameter_optimizer_logs())
+    self.assertLen(model.hyperparameter_optimizer_logs().trials, 5)
+
+  def test_tuner_monotonic_rf_fail(self):
+    tuner = tuner_lib.RandomSearchTuner(num_trials=5)
+
+    with self.assertRaisesRegex(
+        test_utils.AbslInvalidArgumentError,
+        "does not support monotonic constraints",
+    ):
+      _ = specialized_learners.RandomForestLearner(
+          label="income",
+          tuner=tuner,
+          num_trees=10,
+          features=[
+              dataspec.Column("age", monotonic=+1),
+          ],
+          include_all_columns=True,
+      )
+
+  def test_optimize_metric(self):
+    tuner = tuner_lib.RandomSearchTuner(optimize_metric="accuracy")
+    tuner._set_task(generic_model.Task.CLASSIFICATION)
+    self.assertTrue(tuner.train_config.Extensions[
+        hyperparameters_optimizer_pb2.hyperparameters_optimizer_config
+    ].evaluation.metric.classification.HasField("accuracy"))
+
+  def test_optimize_metric_invalid_task(self):
+    tuner = tuner_lib.RandomSearchTuner(optimize_metric="ACCURACY")
+    with self.assertRaisesRegex(
+        ValueError, "Metric ACCURACY is not compatible with task REGRESSION"
+    ):
+      tuner._set_task(generic_model.Task.REGRESSION)
+
+  def test_optimize_metric_invalid(self):
+    with self.assertRaisesRegex(
+        ValueError, "Unknown metric 'invalid'. Supported metrics are:"
+    ):
+      tuner_lib.RandomSearchTuner(optimize_metric="invalid")
+
+  def test_optimize_metric_binary_only(self):
+    tuner = tuner_lib.RandomSearchTuner(optimize_metric="auc")
+    tuner._set_task(generic_model.Task.CLASSIFICATION)
+    data_spec = data_spec_pb2.DataSpecification()
+    col = data_spec.columns.add()
+    col.name = "label"
+    col.categorical.number_of_unique_values = 4
+    with self.assertRaisesRegex(
+        ValueError, "only compatible with binary classification"
+    ):
+      tuner._validate_data_spec("label", data_spec, raise_error=True)
+
+    col.categorical.number_of_unique_values = 3
+    tuner._validate_data_spec(
+        "label", data_spec, raise_error=True
+    )  # Should not raise
 
 if __name__ == "__main__":
   absltest.main()

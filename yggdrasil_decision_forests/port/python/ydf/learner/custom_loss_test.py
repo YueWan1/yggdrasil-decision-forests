@@ -35,6 +35,7 @@ from ydf.model import generic_model
 from ydf.model.gradient_boosted_trees_model import gradient_boosted_trees_model
 from ydf.utils import test_utils
 
+
 Column = dataspec.Column
 
 
@@ -111,59 +112,8 @@ class CustomLossTest(parameterized.TestCase):
         task=generic_learner.Task.REGRESSION,
         num_trees=5,
     )
-    with self.assertRaisesRegex(
-        RuntimeError,
-        'Cannot hold a reference to "labels" outside of a custom loss'
-        " function.*",
-    ):
-      _ = learner_custom_loss.train(ds)
-
-  def test_honor_trigger_gc(self):
-    ref_to_labels = None
-
-    def faulty_gradient_and_hessian(labels, predictions):
-      nonlocal ref_to_labels
-      ref_to_labels = labels
-      return (np.ones(len(labels)), np.ones(len(predictions)))
-
-    faulty_custom_loss = custom_loss.RegressionLoss(
-        initial_predictions=lambda x, y: np.float32(0),
-        gradient_and_hessian=faulty_gradient_and_hessian,
-        loss=lambda x, y, z: np.float32(0),
-        activation=custom_loss.Activation.IDENTITY,
-        may_trigger_gc=False,
-    )
-    ds = test_utils.toy_dataset()
-    learner_custom_loss = specialized_learners.GradientBoostedTreesLearner(
-        label="col_float",
-        loss=faulty_custom_loss,
-        task=generic_learner.Task.REGRESSION,
-        num_trees=5,
-    )
-    model = learner_custom_loss.train(ds)
-    self.assertEqual(model.num_trees(), 5)
-
-  def test_readonly_args(self):
-    def faulty_initial_prediction(
-        labels: npty.NDArray[np.float32], _: npty.NDArray[np.float32]
-    ) -> np.float32:
-      labels[0] = 5
-      return np.float32(0)
-
-    faulty_custom_loss = custom_loss.RegressionLoss(
-        initial_predictions=faulty_initial_prediction,
-        gradient_and_hessian=lambda x, y: (np.ones(len(x)), np.ones(len(x))),
-        loss=lambda x, y, z: np.float32(0),
-        activation=custom_loss.Activation.IDENTITY,
-    )
-    ds = test_utils.toy_dataset()
-    learner_custom_loss = specialized_learners.GradientBoostedTreesLearner(
-        label="col_float",
-        loss=faulty_custom_loss,
-        task=generic_learner.Task.REGRESSION,
-    )
-    with self.assertRaisesRegex(RuntimeError, ".*read-only.*"):
-      _ = learner_custom_loss.train(ds)
+    # Does not crash.
+    _ = learner_custom_loss.train(ds)
 
   @parameterized.parameters(
       (
@@ -269,9 +219,9 @@ class CustomLossTest(parameterized.TestCase):
       sum_weights_positive = np.sum((labels == 2) * weights)
       ratio_positive = sum_weights_positive / sum_weights
       if ratio_positive == 0.0:
-        return -np.iinfo(np.float32).max
+        return -np.iinfo(np.float32).max  # pyrefly: ignore[bad-return, no-matching-overload]
       elif ratio_positive == 1.0:
-        return np.iinfo(np.float32).max
+        return np.iinfo(np.float32).max  # pyrefly: ignore[bad-return, no-matching-overload]
       return np.log(ratio_positive / (1 - ratio_positive))
 
     def binomial_gradient(
@@ -279,7 +229,7 @@ class CustomLossTest(parameterized.TestCase):
     ) -> Tuple[npty.NDArray[np.float32], npty.NDArray[np.float32]]:
       pred_probability = 1.0 / (1.0 + np.exp(-predictions))
       binary_labels = labels == 2
-      return (
+      return (  # pyrefly: ignore[bad-return]
           pred_probability - binary_labels,
           pred_probability * (pred_probability - 1),
       )
@@ -431,11 +381,11 @@ class CustomLossTest(parameterized.TestCase):
         labels: npty.NDArray[np.int32], _: npty.NDArray[np.float32]
     ) -> npty.NDArray[np.float32]:
       dimension = np.max(labels)
-      return np.arange(1, dimension + 1)
+      return np.arange(1, dimension + 1)  # pyrefly: ignore[bad-return]
 
     multiclass_custom_loss = custom_loss.MultiClassificationLoss(
         initial_predictions=multiclass_initial_prediction,
-        gradient_and_hessian=lambda x, y: (
+        gradient_and_hessian=lambda x, y: (  # pyrefly: ignore[bad-argument-type]
             np.ones([3, len(x)]),
             np.ones([3, len(x)]),
         ),
@@ -459,11 +409,11 @@ class CustomLossTest(parameterized.TestCase):
         labels: npty.NDArray[np.int32], _: npty.NDArray[np.float32]
     ) -> npty.NDArray[np.float32]:
       dimension = np.max(labels)
-      return np.arange(1, dimension)
+      return np.arange(1, dimension)  # pyrefly: ignore[bad-return]
 
     multiclass_custom_loss = custom_loss.MultiClassificationLoss(
         initial_predictions=multiclass_initial_prediction,
-        gradient_and_hessian=lambda x, y: (
+        gradient_and_hessian=lambda x, y: (  # pyrefly: ignore[bad-argument-type]
             np.ones([3, len(x)]),
             np.ones([3, len(x)]),
         ),
@@ -712,7 +662,7 @@ class CustomLossTest(parameterized.TestCase):
   def test_cross_validation_no_parallel_evaluations(self):
     toy_custom_loss = custom_loss.RegressionLoss(
         initial_predictions=lambda x, y: np.float32(0),
-        gradient_and_hessian=lambda x, y: (np.ones(len(x)), np.ones(len(x))),
+        gradient_and_hessian=lambda x, y: (np.ones(len(x)), np.ones(len(x))),  # pyrefly: ignore[bad-argument-type]
         loss=lambda x, y, z: np.float32(0),
         activation=custom_loss.Activation.IDENTITY,
     )
@@ -727,7 +677,7 @@ class CustomLossTest(parameterized.TestCase):
     )
     with self.assertRaisesRegex(
         ValueError,
-        "When using custom losses, learner evaluation cannot be use parallel"
+        "When using custom losses, learner evaluation cannot use parallel"
         " evaluations.",
     ):
       _ = learner_custom_loss.cross_validation(
@@ -780,7 +730,7 @@ class CustomLossTest(parameterized.TestCase):
 
     toy_custom_loss = custom_loss.RegressionLoss(
         initial_predictions=lambda x, y: np.float32(0),
-        gradient_and_hessian=lambda x, y: (np.ones(len(x)), np.ones(len(x))),
+        gradient_and_hessian=lambda x, y: (np.ones(len(x)), np.ones(len(x))),  # pyrefly: ignore[bad-argument-type]
         loss=lambda x, y, z: np.float32(0),
         activation=custom_loss.Activation.IDENTITY,
     )

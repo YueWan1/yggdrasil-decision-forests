@@ -41,6 +41,16 @@ class VerticalDataset:
       column_idx: Optional[int] = None,
       dictionary: Optional[npt.NDArray[np.bytes_]] = None,
   ) -> None: ...
+  def PopulateColumnCategoricalIntegerizedNPInt32(
+      self,
+      name: str,
+      data: npt.NDArray[np.int32],
+      ydf_dtype: data_spec_pb2.DType,
+      max_val: int,
+      most_frequent_value: int,
+      num_missing: int,
+      column_idx: Optional[int] = None,
+  ) -> None: ...
   def PopulateColumnCategoricalSetNPBytes(
       self,
       name: str,
@@ -140,6 +150,7 @@ class GBTCCTrainingLogEntry:
   iteration: int
   validation_evaluation: metric_pb2.EvaluationResults
   training_evaluation: metric_pb2.EvaluationResults
+  time: Optional[float]
 
 class GenericCCModel:
   def Predict(
@@ -214,7 +225,7 @@ class GenericCCModel:
   def feature_selection_logs(
       self,
   ) -> abstract_model_pb2.FeatureSelectionLogs: ...
-  def EmbedModel(self, options: embed_pb2.Options) -> Dict[str, str]: ...
+  def EmbedModel(self, options: embed_pb2.Options) -> Dict[str, bytes]: ...
 
 class DecisionForestCCModel(GenericCCModel):
   def num_trees(self) -> int: ...
@@ -271,6 +282,9 @@ class GradientBoostedTreesCCModel(DecisionForestCCModel):
   def num_trees_per_iter(self) -> int: ...
   def loss(self) -> gradient_boosted_trees_pb2.Loss: ...
   def training_logs(self) -> List[GBTCCTrainingLogEntry]: ...
+  def output_logits(self) -> bool: ...
+  def set_output_logits(self, output_logits: bool): ...
+  def early_stopping_triggered(self) -> Optional[bool]: ...
 
 ModelCCType = TypeVar('ModelCCType', bound=GenericCCModel)
 
@@ -287,6 +301,48 @@ def PredictionAnalysisCreateHtmlReport(
 
 # Learner bindings
 # ================
+
+class CCRegressionMetric:
+  def __init__(
+      self,
+      name: str,
+      metric: Callable[
+          [
+              npt.NDArray[np.float32],
+              npt.NDArray[np.float32],
+              npt.NDArray[np.float32],
+          ],
+          np.float32,
+      ],
+  ): ...
+
+class CCBinaryClassificationMetric:
+  def __init__(
+      self,
+      name: str,
+      evaluation_func: Callable[
+          [
+              npt.NDArray[np.int32],
+              npt.NDArray[np.float32],
+              npt.NDArray[np.float32],
+          ],
+          np.float32,
+      ],
+  ): ...
+
+class CCMultiClassificationMetric:
+  def __init__(
+      self,
+      name: str,
+      metric: Callable[
+          [
+              npt.NDArray[np.int32],
+              npt.NDArray[np.float32],
+              npt.NDArray[np.float32],
+          ],
+          np.float32,
+      ],
+  ): ...
 
 class CCRegressionLoss:
   def __init__(
@@ -307,7 +363,6 @@ class CCRegressionLoss:
           [npt.NDArray[np.float32], npt.NDArray[np.float32]],
           Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]],
       ],
-      may_trigger_gc: bool,
   ): ...
 
 class CCBinaryClassificationLoss:
@@ -329,7 +384,6 @@ class CCBinaryClassificationLoss:
           [npt.NDArray[np.int32], npt.NDArray[np.float32]],
           Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]],
       ],
-      may_trigger_gc: bool,
   ): ...
 
 class CCMultiClassificationLoss:
@@ -351,7 +405,6 @@ class CCMultiClassificationLoss:
           [npt.NDArray[np.int32], npt.NDArray[np.float32]],
           Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]],
       ],
-      may_trigger_gc: bool,
   ): ...
 
 class GenericCCLearner:
@@ -364,13 +417,13 @@ class GenericCCLearner:
       self,
       dataset_path: str,
       data_spec: data_spec_pb2.DataSpecification,
-      validation_dataset_path: str = None,
+      validation_dataset_path: Optional[str] = None,
   ) -> ModelCCType: ...
   def TrainFromPathWithGuide(
       self,
       dataset_path: str,
       data_spec_guide: data_spec_pb2.DataSpecificationGuide,
-      validation_dataset_path: str = None,
+      validation_dataset_path: Optional[str] = None,
   ) -> ModelCCType: ...
   def Evaluate(
       self,
@@ -389,7 +442,17 @@ def GetLearner(
     hyperparameters: hyperparameter_pb2.GenericHyperParameters,
     deployment_config: abstract_learner_pb2.DeploymentConfig,
     custom_loss: Optional[CCRegressionLoss],
+    custom_metrics: Optional[
+        List[
+            Union[
+                CCBinaryClassificationMetric,
+                CCRegressionMetric,
+                CCMultiClassificationMetric,
+            ]
+        ]
+    ],
 ) -> GenericCCLearner: ...
+
 def GetInvalidHyperparameters(
     hp_names: Set[str],
     explicit_hps: Set[str],

@@ -220,13 +220,12 @@ cc_library_ydf(
         "@com_google_protobuf//:protobuf",
     ] + select({
         "//yggdrasil_decision_forests:tensorflow_with_header_lib": [
-            "@release_or_nightly//:tensorflow_libtensorflow_framework",
-            "@release_or_nightly//:tensorflow_tf_header_lib",
+            "@local_config_tf//:tensorflow",
         ],
         "//conditions:default": [
-            "@org_tensorflow//tensorflow/core:framework",
-            "@org_tensorflow//tensorflow/core:lib",
-            "@org_tensorflow//tensorflow/core/platform:path",
+            "@tensorflow//tensorflow/core:framework",
+            "@tensorflow//tensorflow/core:lib",
+            "@tensorflow//tensorflow/core/platform:path",
         ],
     }),
     alwayslink = 1,
@@ -287,11 +286,10 @@ cc_library_ydf(
         "@com_google_absl//absl/strings",
     ] + select({
         "//yggdrasil_decision_forests:tensorflow_with_header_lib": [
-            "@release_or_nightly//:tensorflow_libtensorflow_framework",
-            "@release_or_nightly//:tensorflow_tf_header_lib",
+            "@local_config_tf//:tensorflow",
         ],
         "//conditions:default": [
-            "@org_tensorflow//tensorflow/core:lib",
+            "@tensorflow//tensorflow/core:lib",
         ],
     }),
 )
@@ -316,6 +314,7 @@ cc_library_ydf(
         "//yggdrasil_decision_forests:ydf_protobuf_lite": [
             "YGG_PROTOBUF_LITE",
         ],
+        "@platforms//cpu:wasm32": ["YGG_PROTOBUF_LITE"],
         "//conditions:default": [],
     }),
     deps = [
@@ -341,6 +340,37 @@ cc_library_ydf(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library_ydf(
+    name = "smoothed_pav_calibration_fit",
+    srcs = [
+        "smoothed_pav_calibration_fit.cc",
+    ],
+    hdrs = [
+        "smoothed_pav_calibration_fit.h",
+    ],
+    deps = [
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library_ydf(
+    name = "smoothed_pav_calibration_inference",
+    srcs = [
+        "smoothed_pav_calibration_inference.cc",
+    ],
+    hdrs = [
+        "smoothed_pav_calibration_inference.h",
+    ],
+    deps = [
+        ":smoothed_pav_calibration_fit",
+        ":status_macros",
+        "@com_google_absl//absl/log:check",
     ],
 )
 
@@ -631,6 +661,7 @@ cc_library_ydf(
         "//yggdrasil_decision_forests/metric:metric_cc_proto",
         "//yggdrasil_decision_forests/model:abstract_model",
         "//yggdrasil_decision_forests/model:abstract_model_cc_proto",
+        "//yggdrasil_decision_forests/serving:fast_engine",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
@@ -661,7 +692,6 @@ cc_library_ydf(
         ":sharded_io",
         ":status_macros",
         ":test",
-        ":testing_macros",
         ":uid",
         "//yggdrasil_decision_forests/dataset:all_dataset_formats",
         "//yggdrasil_decision_forests/dataset:data_spec",
@@ -686,6 +716,7 @@ cc_library_ydf(
         "//yggdrasil_decision_forests/model:model_engine_wrapper",
         "//yggdrasil_decision_forests/model:model_library",
         "//yggdrasil_decision_forests/model:prediction_cc_proto",
+        "//yggdrasil_decision_forests/model/gradient_boosted_trees",
         "//yggdrasil_decision_forests/serving:example_set",
         "//yggdrasil_decision_forests/serving:fast_engine",
         "//yggdrasil_decision_forests/serving/decision_forest",
@@ -751,6 +782,21 @@ cc_library_ydf(
     hdrs = ["random.h"],
 )
 
+alias(
+    name = "endian",
+    actual = ":endian_default",
+)
+
+cc_library_ydf(
+    name = "endian_default",
+    hdrs = [
+        "endian.h",
+        "endian_default.h",
+    ],
+    defines = ["YGG_ENDIAN_USES_DEFAULT"],
+    visibility = ["//visibility:private"],
+)
+
 cc_library_ydf(
     name = "compatibility",
     hdrs = ["compatibility.h"],
@@ -764,9 +810,9 @@ cc_library_ydf(
     hdrs = ["blob_sequence.h"],
     deps = [
         ":bytestream",
+        ":endian",
         ":status_macros",
         ":zlib",
-        "@com_google_absl//absl/base:endian",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -830,7 +876,7 @@ cc_library_ydf(
         "@com_google_absl//absl/numeric:int128",
         "@com_google_absl//absl/strings",
     ] + [
-        "@farmhash_archive//:farmhash",
+        "@farmhash",
     ],
 )
 
@@ -945,7 +991,6 @@ cc_library_ydf(
     deps = [
         ":bytestream",
         ":status_macros",
-        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -1133,6 +1178,29 @@ cc_test(
 )
 
 cc_test(
+    name = "smoothed_pav_calibration_fit_test",
+    srcs = ["smoothed_pav_calibration_fit_test.cc"],
+    deps = [
+        ":random",
+        ":smoothed_pav_calibration_fit",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "smoothed_pav_calibration_inference_test",
+    srcs = ["smoothed_pav_calibration_inference_test.cc"],
+    deps = [
+        ":random",
+        ":smoothed_pav_calibration_fit",
+        ":smoothed_pav_calibration_inference",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/time",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "status_macros_test",
     srcs = ["status_macros_test.cc"],
     deps = [
@@ -1141,6 +1209,15 @@ cc_test(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "endian_test",
+    srcs = ["endian_test.cc"],
+    deps = [
+        ":endian",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -1500,11 +1577,14 @@ cc_test(
     deps = [
         ":filesystem",
         ":shap",
+        ":status_macros",
         ":test",
         ":testing_macros",
         "//yggdrasil_decision_forests/dataset:csv_example_reader",
         "//yggdrasil_decision_forests/dataset:csv_example_writer",
+        "//yggdrasil_decision_forests/dataset:data_spec_cc_proto",
         "//yggdrasil_decision_forests/dataset:data_spec_inference",
+        "//yggdrasil_decision_forests/dataset:example_cc_proto",
         "//yggdrasil_decision_forests/dataset:vertical_dataset",
         "//yggdrasil_decision_forests/dataset:vertical_dataset_io",
         "//yggdrasil_decision_forests/learner:learner_library",
@@ -1514,6 +1594,7 @@ cc_test(
         "//yggdrasil_decision_forests/learner/isolation_forest",
         "//yggdrasil_decision_forests/learner/random_forest",
         "//yggdrasil_decision_forests/model:abstract_model",
+        "//yggdrasil_decision_forests/model/decision_tree",
         "//yggdrasil_decision_forests/model/gradient_boosted_trees",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",

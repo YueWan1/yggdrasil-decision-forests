@@ -47,6 +47,8 @@
 #include "yggdrasil_decision_forests/dataset/weight.h"
 #include "yggdrasil_decision_forests/dataset/weight.pb.h"
 #include "yggdrasil_decision_forests/learner/abstract_learner.pb.h"
+#include "yggdrasil_decision_forests/learner/postprocessor/abstract_postprocessor.pb.h"
+#include "yggdrasil_decision_forests/learner/postprocessor/postprocessor_library.h"
 #include "yggdrasil_decision_forests/metric/metric.h"
 #include "yggdrasil_decision_forests/metric/metric.pb.h"
 #include "yggdrasil_decision_forests/model/abstract_model.h"
@@ -352,21 +354,48 @@ std::unique_ptr<AbstractModel> AbstractLearner::Train(
 absl::StatusOr<std::unique_ptr<AbstractModel>> AbstractLearner::TrainWithStatus(
     const dataset::VerticalDataset& train_dataset,
     std::optional<std::reference_wrapper<const dataset::VerticalDataset>>
-        valid_dataset) const {
+        valid_dataset,
+    std::unique_ptr<AbstractModel> existing_model) const {
   utils::usage::OnTrainingStart(train_dataset.data_spec(), training_config(),
                                 GetMetadataWithDefaults(training_config()),
                                 train_dataset.nrow());
   const auto begin_training = absl::Now();
 
-  ASSIGN_OR_RETURN(auto model,
-                   TrainWithStatusImpl(train_dataset, valid_dataset));
+  std::unique_ptr<AbstractModel> model;
+  bool model_altered = false;
+  // TODO: Branch on a proto field for continuous training.
+  if (existing_model != nullptr) {
+    model = std::move(existing_model);
+    LOG(INFO) << "Using existing model: " << model->name();
+  } else {
+    LOG(INFO) << "Creating new model.";
+    ASSIGN_OR_RETURN(model, TrainWithStatusImpl(train_dataset, valid_dataset));
+    model_altered = true;
+  }
+
+  if (training_config().postprocessors_size() > 0) {
+    LOG(INFO) << "Training " << training_config().postprocessors_size()
+              << " postprocessors.";
+    for (const auto& postprocessor : training_config().postprocessors()) {
+      RETURN_IF_ERROR(TrainPostprocessor(postprocessor, *model, train_dataset,
+                                         valid_dataset));
+    }
+    model_altered = true;
+  }
 
   utils::usage::OnTrainingEnd(train_dataset.data_spec(), training_config(),
                               train_dataset.nrow(), *model,
                               absl::Now() - begin_training);
 
   if (training_config().pure_serving_model()) {
+    LOG(INFO) << "Making model pure serving.";
     RETURN_IF_ERROR(model->MakePureServing());
+    model_altered = true;
+  }
+
+  if (!model_altered) {
+    return absl::InvalidArgumentError(
+        "The model was not altered during training.");
   }
   return model;
 }
@@ -384,11 +413,69 @@ AbstractLearner::TrainWithStatusImpl(
       "TrainWithStatusImpl (deprecated).");
 }
 
+absl::Status AbstractLearner::TrainPostprocessor(
+    const postprocessor::proto::AbstractPostprocessorTrainingConfig&
+        postprocessor_config,
+    AbstractModel& model, const dataset::VerticalDataset& train_dataset,
+    std::optional<std::reference_wrapper<const dataset::VerticalDataset>>
+        valid_dataset) const {
+  if (postprocessor_config.use_validation_dataset()) {
+    if (!valid_dataset.has_value()) {
+      return absl::InvalidArgumentError(
+          "use_validation_dataset is true, but valid_dataset is not provided.");
+    }
+    LOG(INFO) << "Using validation dataset for postprocessor training.";
+  } else {
+    LOG(INFO) << "Using training dataset for postprocessor training.";
+  }
+
+  proto::TrainingConfigLinking training_config_linking;
+  RETURN_IF_ERROR(AbstractLearner::LinkTrainingConfig(
+      training_config(),
+      (postprocessor_config.use_validation_dataset()
+           ? valid_dataset.value().get()
+           : train_dataset)
+          .data_spec(),
+      &training_config_linking));
+
+  ASSIGN_OR_RETURN(
+      auto postprocessor,
+      postprocessor::CreatePostprocessor(
+          deployment(), training_config_linking, postprocessor_config, model,
+          postprocessor_config.use_validation_dataset()
+              ? valid_dataset.value().get()
+              : train_dataset));
+
+  model.AddPostprocessor(postprocessor);
+
+  return absl::OkStatus();
+}
+
+absl::Status AbstractLearner::TrainPostprocessor(
+    const postprocessor::proto::AbstractPostprocessorTrainingConfig&
+        postprocessor_config,
+    AbstractModel& model, absl::string_view typed_path,
+    const dataset::proto::DataSpecification& data_spec,
+    const std::optional<std::string>& typed_valid_path) const {
+  ASSIGN_OR_RETURN(
+      auto pair_of_datasets,
+      GenerateVerticalDatasets(typed_path, data_spec, typed_valid_path));
+  if (pair_of_datasets.second != nullptr) {
+    return TrainPostprocessor(
+        postprocessor_config, model, pair_of_datasets.first,
+        *pair_of_datasets.second);
+  } else {
+    return TrainPostprocessor(
+        postprocessor_config, model, pair_of_datasets.first, std::nullopt);
+  }
+}
+
 // API; dataset on disk.
 absl::StatusOr<std::unique_ptr<AbstractModel>> AbstractLearner::TrainWithStatus(
     absl::string_view typed_path,
     const dataset::proto::DataSpecification& data_spec,
-    const std::optional<std::string>& typed_valid_path) const {
+    const std::optional<std::string>& typed_valid_path,
+    std::unique_ptr<AbstractModel> existing_model) const {
   std::string path;
   ASSIGN_OR_RETURN(std::tie(std::ignore, path),
                    dataset::SplitTypeAndPath(typed_path));
@@ -399,8 +486,20 @@ absl::StatusOr<std::unique_ptr<AbstractModel>> AbstractLearner::TrainWithStatus(
                                 /*num_examples=*/-1);
   const auto begin_training = absl::Now();
 
-  ASSIGN_OR_RETURN(
-      auto model, TrainWithStatusImpl(typed_path, data_spec, typed_valid_path));
+  std::unique_ptr<AbstractModel> model;
+  if (existing_model != nullptr) {
+    model = std::move(existing_model);
+  } else {
+    ASSIGN_OR_RETURN(
+        model, TrainWithStatusImpl(typed_path, data_spec, typed_valid_path));
+  }
+
+  if (training_config().postprocessors_size() > 0) {
+    for (const auto& postprocessor : training_config().postprocessors()) {
+      RETURN_IF_ERROR(TrainPostprocessor(postprocessor, *model, typed_path,
+                                         data_spec, typed_valid_path));
+    }
+  }
 
   utils::usage::OnTrainingEnd(data_spec, training_config(),
                               /*num_examples=*/-1, *model,
@@ -415,6 +514,24 @@ absl::StatusOr<std::unique_ptr<AbstractModel>> AbstractLearner::TrainWithStatus(
 // Impl; dataset on disk.
 absl::StatusOr<std::unique_ptr<AbstractModel>>
 AbstractLearner::TrainWithStatusImpl(
+    absl::string_view typed_path,
+    const dataset::proto::DataSpecification& data_spec,
+    const std::optional<std::string>& typed_valid_path) const {
+  ASSIGN_OR_RETURN(
+      auto pair_of_datasets,
+      GenerateVerticalDatasets(typed_path, data_spec, typed_valid_path));
+  if (pair_of_datasets.second != nullptr) {
+    return TrainWithStatusImpl(pair_of_datasets.first,
+                               *pair_of_datasets.second);
+  } else {
+    return TrainWithStatusImpl(pair_of_datasets.first, std::nullopt);
+  }
+}
+
+absl::StatusOr<std::pair<
+    dataset::VerticalDataset,
+    std::unique_ptr<dataset::VerticalDataset>>>
+AbstractLearner::GenerateVerticalDatasets(
     absl::string_view typed_path,
     const dataset::proto::DataSpecification& data_spec,
     const std::optional<std::string>& typed_valid_path) const {
@@ -437,16 +554,15 @@ AbstractLearner::TrainWithStatusImpl(
 
   RETURN_IF_ERROR(dataset::CheckNumExamples(train_dataset.nrow()));
 
-  dataset::VerticalDataset valid_dataset_data;
-  std::optional<std::reference_wrapper<const dataset::VerticalDataset>>
-      valid_dataset;
+  std::unique_ptr<dataset::VerticalDataset> valid_dataset;
   if (typed_valid_path.has_value()) {
+    valid_dataset = std::make_unique<dataset::VerticalDataset>();
     RETURN_IF_ERROR(LoadVerticalDataset(
-        typed_valid_path.value(), data_spec, &valid_dataset_data,
+        typed_valid_path.value(), data_spec, valid_dataset.get(),
         /*required_columns=*/{}, dataset_loading_config));
-    valid_dataset = valid_dataset_data;
   }
-  return TrainWithStatusImpl(train_dataset, valid_dataset);
+
+  return std::make_pair(std::move(train_dataset), std::move(valid_dataset));
 }
 
 absl::Status CheckGenericHyperParameterSpecification(
@@ -587,7 +703,9 @@ absl::Status AbstractLearner::CheckConfiguration(
             "The categorical training label column \"", config.label(),
             "\" contains out-of-dictionary values. This is not allowed. Make "
             "sure the Dataspec guide of the label column is configured with "
-            "`min_vocab_frequency=0` and `max_vocab_count=-1`."));
+            "`min_vocab_frequency=0` and `max_vocab_count=-1`. If you "
+            "explicitly provided label classes, make sure the list "
+            "contains all the unique values present in the label column"));
       }
     } break;
     case model::proto::Task::REGRESSION:
@@ -897,7 +1015,7 @@ absl::StatusOr<metric::proto::EvaluationResults> EvaluateLearnerOrStatus(
           const int fold_idx, utils::RandomEngine* rnd) {
         metric::proto::EvaluationResults evaluation;
         {
-          utils::concurrency::MutexLock lock(&evaluation_mutex);
+          utils::concurrency::MutexLock lock(evaluation_mutex);
           if (!status_train_and_evaluate.ok()) {
             return;
           }
@@ -920,7 +1038,7 @@ absl::StatusOr<metric::proto::EvaluationResults> EvaluateLearnerOrStatus(
             testing_dataset, evaluation_options, rnd, &evaluation);
         // Aggregate the evaluations.
         {
-          utils::concurrency::MutexLock lock(&evaluation_mutex);
+          utils::concurrency::MutexLock lock(evaluation_mutex);
           status_train_and_evaluate.Update(status_append);
           status_train_and_evaluate.Update(metric::MergeEvaluation(
               evaluation_options, evaluation, &aggregated_evaluation));
@@ -1124,6 +1242,31 @@ absl::Status CopyProblemDefinition(const proto::TrainingConfig& src,
 
   if (src.features_size() > 0 && dst->features_size() == 0) {
     *dst->mutable_features() = src.features();
+  }
+
+  if (src.monotonic_constraints_size() > 0) {
+    if (dst->monotonic_constraints_size() > 0) {
+      bool is_equal = true;
+      if (dst->monotonic_constraints_size() !=
+          src.monotonic_constraints_size()) {
+        is_equal = false;
+      } else {
+        for (int i = 0; i < src.monotonic_constraints_size(); ++i) {
+          if (dst->monotonic_constraints(i).feature() !=
+                  src.monotonic_constraints(i).feature() ||
+              dst->monotonic_constraints(i).direction() !=
+                  src.monotonic_constraints(i).direction()) {
+            is_equal = false;
+            break;
+          }
+        }
+      }
+      if (!is_equal) {
+        return absl::InvalidArgumentError("Invalid monotonic_constraints.");
+      }
+    } else {
+      *dst->mutable_monotonic_constraints() = src.monotonic_constraints();
+    }
   }
 
   return absl::OkStatus();

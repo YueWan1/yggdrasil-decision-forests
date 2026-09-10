@@ -5,6 +5,13 @@ Changelog under `yggdrasil_decision_forests/port/python/CHANGELOG.md`.
 
 ## HEAD
 
+### Features
+
+-   "True" and "False" are now recognized as boolean in CSV files. This change
+    only changes the behaviour of columns explicitly specified as BOOLEAN.
+
+## 1.12.0 - 2026-02-04
+
 ### API Changes
 
 -   The `Uplift` task is not currently compatible with the `honest=True`
@@ -15,10 +22,21 @@ Changelog under `yggdrasil_decision_forests/port/python/CHANGELOG.md`.
 ### Features
 
 -   Allow custom fields in model metadata.
+-   Add export to standalone Java.
+-   Added the Highway Quickscorer inference engines for faster inference on
+    supported machines.
+-   Various performance improvements.
 
 ### Fix
 
 -   Fix honest trees implementation.
+-   Various bugfixes
+-   Random Forests training no longer trains recursively, which fixes a number
+    of crashes in debug mode.
+
+### Infra
+
+-   YDF and Yggdrasil Decision Forests now use Bazel 7 and Bzlmod.
 
 ## 1.11.0 - 2025-03-12
 

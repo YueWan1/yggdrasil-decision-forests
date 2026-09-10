@@ -132,7 +132,7 @@ Terminology:
 Task: REGRESSION
 Loss (SQUARED_ERROR): 0.393557
 
-RMSE: 0.627341
+RMSE: 0.393557
 Default RMSE: : 0
 </pre><div style='display: grid; gap: 0px; grid-auto-columns: min-content;'><div style='grid-row:1 / span 1; grid-column:1 / span 1;'><script src='https://www.gstatic.com/external_hosted/plotly/plotly.min.js'></script><div id="chart_123self_eval_item0" style="display: inline-block;" ></div><script>
 (function() {
@@ -174,7 +174,8 @@ name: 'validation',
         showgrid: true,
         zeroline: false,
         showline: true,
-        title: 'iteration',
+        title: { text: 'iteration' },
+        automargin: true,
         },
       font: {
         size: 10,
@@ -184,13 +185,13 @@ name: 'validation',
         showgrid: true,
         zeroline: false,
         showline: true,
-        title: 'loss',
+        title: { text: 'loss' },
+        automargin: true,
         },
       margin: {
-        l: 50,
-        r: 50,
-        b: 50,
-        t: 50,
+        t: 30,
+        b: 30,
+        l: 30,
       },
     },
     {
@@ -277,7 +278,8 @@ name: 'validation',
         showgrid: true,
         zeroline: false,
         showline: true,
-        title: 'iteration',
+        title: { text: 'iteration' },
+        automargin: true,
         },
       font: {
         size: 10,
@@ -287,13 +289,13 @@ name: 'validation',
         showgrid: true,
         zeroline: false,
         showline: true,
-        title: 'rmse',
+        title: { text: 'rmse' },
+        automargin: true,
         },
       margin: {
-        l: 50,
-        r: 50,
-        b: 50,
-        t: 50,
+        t: 30,
+        b: 30,
+        l: 30,
       },
     },
     {

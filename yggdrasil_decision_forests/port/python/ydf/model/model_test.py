@@ -339,6 +339,7 @@ class GenericModelTest(parameterized.TestCase):
             "MEAN_DECREASE_IN_AP_>50K_VS_OTHERS",
             "MEAN_DECREASE_IN_AUC_>50K_VS_OTHERS",
             "MEAN_DECREASE_IN_PRAUC_>50K_VS_OTHERS",
+            "SHAP_VALUE",
             "[In model] NUM_NODES",
             "[In model] NUM_AS_ROOT",
             "[In model] SUM_SCORE",
@@ -480,6 +481,7 @@ class GenericModelTest(parameterized.TestCase):
         set(analysis.variable_importances()),
         set([
             "MEAN_INCREASE_IN_RMSE",
+            "SHAP_VALUE",
             "[In model] INV_MEAN_MIN_DEPTH",
             "[In model] SUM_SCORE",
             "[In model] NUM_NODES",
@@ -526,6 +528,7 @@ class GenericModelTest(parameterized.TestCase):
         set(analysis.variable_importances()),
         set([
             "MEAN_DECREASE_IN_NDCG",
+            "SHAP_VALUE",
             "[In model] SUM_SCORE",
             "[In model] NUM_NODES",
             "[In model] INV_MEAN_MIN_DEPTH",
@@ -700,6 +703,7 @@ Use `model.describe()` for more details.
     # Dataspec description
     self.assertIn("DATASPEC:", text_description)
     self.assertIn("Number of records:", text_description)
+    self.assertIn("Early stopping triggered:", text_description)
 
   def test_model_describe_html(self):
     html_description = self.adult_binary_class_gbdt.describe("html")
@@ -846,7 +850,7 @@ Use `model.describe()` for more details.
         original_predictions, deserialized_predictions, decimal=5
     )
 
-  def test_model_embed(self):
+  def test_model_embed_cc(self):
     model = model_lib.load_model(
         os.path.join(self._model_dir, "adult_binary_class_gbdt_v2")
     )
@@ -868,6 +872,7 @@ Use `model.describe()` for more details.
             test_utils.ydf_test_data_path(),
             "golden",
             "embed",
+            "cpp",
             "adult_binary_class_gbdt_v2_class.h.golden",
         ),
     )
@@ -878,7 +883,46 @@ Use `model.describe()` for more details.
             test_utils.ydf_test_data_path(),
             "golden",
             "embed",
+            "cpp",
             "adult_binary_class_gbdt_v2_probability_routing.h.golden",
+        ),
+    )
+
+  def test_model_embed_java(self):
+    model = model_lib.load_model(
+        os.path.join(self._model_dir, "adult_binary_class_gbdt_v2")
+    )
+    while model.num_trees() > 3:
+      model.remove_tree(model.num_trees() - 1)
+    embedded_model_files = model.to_standalone_java(
+        package_name="com.google.ydf",
+        classification_output="PROBABILITY",
+    )
+    self.assertIsInstance(embedded_model_files, dict)
+    self.assertLen(embedded_model_files, 2)
+    self.assertIn("YdfModel.java", embedded_model_files)
+    self.assertIn("YdfModelData.bin", embedded_model_files)
+
+    test_utils.golden_check_string(
+        self,
+        embedded_model_files["YdfModel.java"].decode(),
+        os.path.join(
+            test_utils.ydf_test_data_path(),
+            "golden",
+            "embed",
+            "java",
+            "adult_binary_class_gbdt_v2_probability_routing.java.golden",
+        ),
+    )
+    test_utils.golden_check_bytes(
+        self,
+        embedded_model_files["YdfModelData.bin"],
+        os.path.join(
+            test_utils.ydf_test_data_path(),
+            "golden",
+            "embed",
+            "java",
+            "adult_binary_class_gbdt_v2_probability_routing_data.bin.golden",
         ),
     )
 
@@ -1366,6 +1410,42 @@ Use `model.describe()` for more details.
       with open(os.path.join(tempdir, "header.pb"), "rb") as f:
         header = abstract_model_pb2.AbstractModel.FromString(f.read())
         self.assertFalse(header.is_pure_model)
+
+  def test_set_data_spec(self):
+    model = model_lib.load_model(
+        os.path.join(self._model_dir, "adult_binary_class_gbdt")
+    )
+    dataset_path = os.path.join(
+        test_utils.ydf_test_data_path(), "dataset", "adult_test.csv"
+    )
+    test_df = pd.read_csv(dataset_path)
+
+    # Initial prediction ensures the serving engine is compiled and cached.
+    predictions_before = model.predict(test_df)
+
+    # Modify dataspec by renaming an input column.
+    data_spec = data_spec_pb2.DataSpecification()
+    data_spec.CopyFrom(model.data_spec())
+    for col in data_spec.columns:
+      if col.name == "age":
+        col.name = "age_renamed"
+        break
+
+    model.set_data_spec(data_spec)
+
+    self.assertEqual(model.data_spec(), data_spec)
+    self.assertIn("age_renamed", model.input_feature_names())
+    self.assertNotIn("age", model.input_feature_names())
+
+    # Predicting with the updated column name invalidates and recompiles
+    # the engine.
+    renamed_df = test_df.rename(columns={"age": "age_renamed"})
+    predictions_after = model.predict(renamed_df)
+    npt.assert_equal(predictions_before, predictions_after)
+
+    # Original DataFrame is missing "age_renamed" so prediction fails.
+    with self.assertRaises(ValueError):
+      model.predict(test_df)
 
 
 if __name__ == "__main__":

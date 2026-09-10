@@ -1,6 +1,9 @@
-# Learner bindings for PYDF
-# pytype binary, test, library
 load("@pybind11_bazel//:build_defs.bzl", "pybind_library")
+
+# Learner bindings for PYDF
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("@ydf_cc//yggdrasil_decision_forests/utils:compile.bzl", "cc_library_ydf")
 load("//ydf/learner/wrapper:wrapper_generator.bzl", "py_wrap_yggdrasil_learners")
 
@@ -61,6 +64,7 @@ pybind_library(
     deps = [
         ":canonical_learners",
         ":custom_loss",
+        ":custom_metric",
         "//ydf/model:model_cc",
         "//ydf/model:model_wrapper",
         "//ydf/utils:status_casters",
@@ -68,7 +72,7 @@ pybind_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@com_google_pybind11_protobuf//pybind11_protobuf:native_proto_caster",
+        "@pybind11_protobuf//pybind11_protobuf:native_proto_caster",
         "@ydf_cc//yggdrasil_decision_forests/dataset:data_spec",
         "@ydf_cc//yggdrasil_decision_forests/dataset:data_spec_cc_proto",
         "@ydf_cc//yggdrasil_decision_forests/dataset:data_spec_inference",
@@ -97,6 +101,7 @@ pybind_library(
     hdrs = ["custom_loss.h"],
     deps = [
         "//ydf/utils:numpy_data",
+        "//ydf/utils:pybind",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -117,14 +122,9 @@ py_library(
     deps = [
         ":abstract_feature_selector",
         ":custom_loss_py",
+        ":custom_metric_py",
         ":hyperparameters",
         ":tuner",
-        # absl/logging dep,
-        "@ydf_cc//yggdrasil_decision_forests/dataset:data_spec_py_proto",
-        "@ydf_cc//yggdrasil_decision_forests/dataset:weight_py_proto",
-        "@ydf_cc//yggdrasil_decision_forests/learner:abstract_learner_py_proto",
-        "@ydf_cc//yggdrasil_decision_forests/metric:metric_py_proto",
-        "@ydf_cc//yggdrasil_decision_forests/model:abstract_model_py_proto",
         "//ydf/cc:ydf",
         "//ydf/dataset",
         "//ydf/dataset:dataspec",
@@ -133,6 +133,11 @@ py_library(
         "//ydf/model:model_lib",
         "//ydf/utils:concurrency",
         "//ydf/utils:log",
+        "@ydf_cc//yggdrasil_decision_forests/dataset:data_spec_py_proto",
+        "@ydf_cc//yggdrasil_decision_forests/dataset:weight_py_proto",
+        "@ydf_cc//yggdrasil_decision_forests/learner:abstract_learner_py_proto",
+        "@ydf_cc//yggdrasil_decision_forests/metric:metric_py_proto",
+        "@ydf_cc//yggdrasil_decision_forests/model:abstract_model_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/utils:fold_generator_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/utils/distribute/implementations/grpc:grpc_py_proto",
     ],
@@ -167,6 +172,7 @@ py_library(
     srcs = ["hyperparameters.py"],
     deps = [
         ":custom_loss_py",
+        ":custom_metric_py",
         "//ydf/cc:ydf",
         "@ydf_cc//yggdrasil_decision_forests/learner:abstract_learner_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/model:hyperparameter_py_proto",
@@ -183,6 +189,16 @@ py_library(
     ],
 )
 
+py_library(
+    name = "custom_metric_py",
+    srcs = ["custom_metric.py"],
+    deps = [
+        # numpy dep,
+        "@ydf_cc//yggdrasil_decision_forests/model:abstract_model_py_proto",
+        "//ydf/cc:ydf",
+    ],
+)
+
 # This target is not referenced is included for documentation purposes only.
 # See `:specialized_learners` for further information.
 py_library(
@@ -190,10 +206,11 @@ py_library(
     srcs = ["specialized_learners_pre_generated.py"],
     deps = [
         ":abstract_feature_selector",
+        ":custom_loss_py",
+        ":custom_metric_py",
         ":generic_learner",
         ":hyperparameters",
         ":tuner",
-        "//ydf/cc:ydf",
         "//ydf/dataset",
         "//ydf/dataset:dataspec",
         "//ydf/model/gradient_boosted_trees_model",
@@ -209,6 +226,9 @@ py_library(
     name = "tuner",
     srcs = ["tuner.py"],
     deps = [
+        "//ydf/model:generic_model",
+        "//ydf/utils:log",
+        "@ydf_cc//yggdrasil_decision_forests/dataset:data_spec_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/learner:abstract_learner_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/learner/hyperparameters_optimizer:hyperparameters_optimizer_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/learner/hyperparameters_optimizer/optimizers:random_py_proto",
@@ -237,9 +257,29 @@ pybind_library(
         "@com_google_absl//absl/status:statusor",
         "@ydf_cc//yggdrasil_decision_forests/utils:concurrency",
         "@ydf_cc//yggdrasil_decision_forests/utils:logging",
+        "@ydf_cc//yggdrasil_decision_forests/utils:synchronization_primitives",
         "@ydf_cc//yggdrasil_decision_forests/utils:uid",
         "@ydf_cc//yggdrasil_decision_forests/utils/distribute/implementations/grpc",
         "@ydf_cc//yggdrasil_decision_forests/utils/distribute/implementations/grpc:grpc_worker",
+    ],
+)
+
+pybind_library(
+    name = "custom_metric",
+    srcs = ["custom_metric.cc"],
+    hdrs = ["custom_metric.h"],
+    deps = [
+        "//ydf/utils:numpy_data",
+        "//ydf/utils:pybind",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@ydf_cc//yggdrasil_decision_forests/learner:abstract_learner",
+        "@ydf_cc//yggdrasil_decision_forests/learner/gradient_boosted_trees",
+        "@ydf_cc//yggdrasil_decision_forests/learner/gradient_boosted_trees/loss:loss_interface",
+        "@ydf_cc//yggdrasil_decision_forests/utils:status_macros",
     ],
 )
 
@@ -346,7 +386,9 @@ py_test(
         ":specialized_learners",
         ":tuner",
         # absl/testing:absltest dep,
+        # absl/testing:parameterized dep,
         # numpy dep,
+        # pandas dep,
         "//ydf/dataset:dataspec",
         "//ydf/utils:test_utils",
     ],
@@ -456,16 +498,21 @@ py_test(
 py_test(
     name = "tuner_test",
     srcs = ["tuner_test.py"],
+    data = ["@ydf_cc//yggdrasil_decision_forests/test_data"],
     tags = [
     ],
     deps = [
+        ":specialized_learners",
         ":tuner",
         # absl/testing:absltest dep,
         # absl/testing:parameterized dep,
+        "@ydf_cc//yggdrasil_decision_forests/dataset:data_spec_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/learner:abstract_learner_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/learner/hyperparameters_optimizer:hyperparameters_optimizer_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/learner/hyperparameters_optimizer/optimizers:random_py_proto",
         "@ydf_cc//yggdrasil_decision_forests/model:hyperparameter_py_proto",
+        "//ydf/dataset:dataspec",
+        "//ydf/model:generic_model",
         "//ydf/utils:test_utils",
         "@ydf_cc//yggdrasil_decision_forests/utils:fold_generator_py_proto",
     ],
@@ -484,5 +531,17 @@ py_test(
         # absl/testing:parameterized dep,
         # numpy dep,
         "//ydf/utils:test_utils",
+    ],
+)
+
+py_test(
+    name = "custom_metric_test",
+    srcs = ["custom_metric_test.py"],
+    deps = [
+        ":custom_metric_py",
+        # absl/testing:absltest dep,
+        # absl/testing:parameterized dep,
+        # numpy dep,
+        "@ydf_cc//yggdrasil_decision_forests/model:abstract_model_py_proto",
     ],
 )

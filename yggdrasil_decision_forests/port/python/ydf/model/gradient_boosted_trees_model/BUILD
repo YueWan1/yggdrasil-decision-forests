@@ -1,5 +1,6 @@
-# pytype test and library
 load("@pybind11_bazel//:build_defs.bzl", "pybind_library")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -19,6 +20,7 @@ pybind_library(
         "@com_google_absl//absl/status:statusor",
         "@ydf_cc//yggdrasil_decision_forests/metric:metric_cc_proto",
         "@ydf_cc//yggdrasil_decision_forests/model:abstract_model",
+        "@ydf_cc//yggdrasil_decision_forests/model:abstract_model_cc_proto",
         "@ydf_cc//yggdrasil_decision_forests/model/gradient_boosted_trees",
         "@ydf_cc//yggdrasil_decision_forests/model/gradient_boosted_trees:gradient_boosted_trees_cc_proto",
         "@ydf_cc//yggdrasil_decision_forests/utils:logging",
@@ -58,6 +60,7 @@ py_test(
         # pandas dep,
         "//ydf/dataset:dataspec",
         "//ydf/learner:custom_loss_py",
+        "//ydf/learner:custom_metric_py",
         "//ydf/learner:specialized_learners",
         "//ydf/model:generic_model",
         "//ydf/model:model_lib",

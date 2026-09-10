@@ -22,10 +22,12 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import numpy.testing as npt
+import numpy.typing as nptt
 import pandas as pd
 
 from ydf.dataset import dataspec
 from ydf.learner import custom_loss
+from ydf.learner import custom_metric
 from ydf.learner import specialized_learners
 from ydf.model import generic_model
 from ydf.model import model_lib
@@ -49,6 +51,77 @@ def load_model(
 ) -> gradient_boosted_trees_model.GradientBoostedTreesModel:
   path = os.path.join(test_utils.ydf_test_data_path(), directory, name)
   return model_lib.load_model(path)
+
+
+def _evaluate_binary_threshold(
+    labels: nptt.NDArray[np.int32],
+    predictions: nptt.NDArray[np.float32],
+    weights: nptt.NDArray[np.float32],
+) -> np.float32:
+  predicted_positive = predictions > 0.0
+  actual_positive = labels == 2
+  is_correct = predicted_positive == actual_positive
+  if weights.size == 0:
+    return np.float32(np.sum(is_correct) / len(is_correct)) + 1.0
+  else:
+    weighted_correct = np.sum(weights * is_correct)
+    total_weight = np.sum(weights)
+    return np.float32(weighted_correct / total_weight)
+
+
+def _evaluate_binary_threshold_no_weight_check(
+    labels: nptt.NDArray[np.int32],
+    predictions: nptt.NDArray[np.float32],
+    weights: nptt.NDArray[np.float32],
+) -> np.float32:
+  predicted_positive = predictions > 0.0
+  actual_positive = labels == 2
+  is_correct = predicted_positive == actual_positive
+  weighted_correct = np.sum(weights * is_correct)
+  total_weight = np.sum(weights)
+  return np.float32(weighted_correct / total_weight)
+
+
+def _evaluate_multi_class_accuracy(
+    labels: nptt.NDArray[np.int32],
+    predictions: nptt.NDArray[np.float32],
+    weights: nptt.NDArray[np.float32],
+) -> np.float32:
+  predicted_classes = np.argmax(predictions, axis=1) + 1
+  is_correct = predicted_classes == labels
+
+  if weights.size == 0:
+    return np.float32(np.mean(is_correct))
+  else:
+    weighted_correct = np.sum(weights * is_correct)
+    total_weight = np.sum(weights)
+    return np.float32(weighted_correct / total_weight)
+
+
+def _evaluate_regression_rmse(
+    labels: nptt.NDArray[np.float32],
+    predictions: nptt.NDArray[np.float32],
+    weights: nptt.NDArray[np.float32],
+) -> np.float32:
+  squared_errors = (predictions - labels) ** 2
+  if weights.size == 0:
+    return np.float32(np.sqrt(np.mean(squared_errors)))
+  else:
+    weighted_mse = np.sum(weights * squared_errors) / np.sum(weights)
+    return np.float32(np.sqrt(weighted_mse))
+
+
+def _evaluate_regression_mean_difference(
+    labels: nptt.NDArray[np.float32],
+    predictions: nptt.NDArray[np.float32],
+    weights: nptt.NDArray[np.float32],
+) -> np.float32:
+  if weights.size == 0:
+    return np.float32(np.mean(predictions - labels))
+  else:
+    return np.float32(
+        np.sum(weights * (predictions - labels)) / np.sum(weights)
+    )
 
 
 class GradientBoostedTreesTest(parameterized.TestCase):
@@ -81,16 +154,40 @@ class GradientBoostedTreesTest(parameterized.TestCase):
       self.assertIsNotNone(training_evaluation)
 
       if idx == 0:
-        self.assertAlmostEqual(evaluation.loss, 1.0824289)
-        self.assertAlmostEqual(training_evaluation.loss, 1.062329, places=6)
+        self.assertAlmostEqual(evaluation.loss, 1.0824289)  # pyrefly: ignore[no-matching-overload]
+        self.assertAlmostEqual(training_evaluation.loss, 1.062329, places=6)  # pyrefly: ignore[no-matching-overload]
       elif idx == 49:
-        self.assertAlmostEqual(evaluation.loss, 0.677054)
-        self.assertAlmostEqual(evaluation.accuracy, 0.8434505)
-        self.assertAlmostEqual(training_evaluation.loss, 0.57730037)
+        self.assertAlmostEqual(evaluation.loss, 0.677054)  # pyrefly: ignore[no-matching-overload]
+        self.assertAlmostEqual(evaluation.accuracy, 0.8434505)  # pyrefly: ignore[no-matching-overload]
+        self.assertAlmostEqual(training_evaluation.loss, 0.57730037)  # pyrefly: ignore[no-matching-overload]
       elif idx == 99:
-        self.assertAlmostEqual(evaluation.loss, 0.6498283)
-        self.assertAlmostEqual(training_evaluation.loss, 0.5057407)
-        self.assertAlmostEqual(training_evaluation.accuracy, 0.89436144)
+        self.assertAlmostEqual(evaluation.loss, 0.6498283)  # pyrefly: ignore[no-matching-overload]
+        self.assertAlmostEqual(training_evaluation.loss, 0.5057407)  # pyrefly: ignore[no-matching-overload]
+        self.assertAlmostEqual(training_evaluation.accuracy, 0.89436144)  # pyrefly: ignore[no-matching-overload]
+
+  def test_training_logs_with_newly_trained_model(self):
+    dataset = {
+        "x": np.array([0, 0, 1, 1] * 20),
+        "y": np.array([0, 0, 1, 1] * 20),
+    }
+    model = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=5,
+        validation_ratio=0.5,
+    ).train(dataset)
+
+    training_logs = model.training_logs()
+    self.assertLen(training_logs, 5)
+
+    for log in training_logs:
+      # Check validation evaluation
+      self.assertIsNotNone(log.evaluation)
+      self.assertTrue(hasattr(log.evaluation, "loss"))
+      self.assertIsInstance(log.evaluation.loss, float)
+
+      # Check training evaluation
+      self.assertIsNotNone(log.training_evaluation)
+      self.assertTrue(hasattr(log.training_evaluation, "loss"))
 
   def test_empty_training_logs(self):
     # This model has no training logs.
@@ -158,7 +255,7 @@ class GradientBoostedTreesTest(parameterized.TestCase):
 
   def test_validation_loss(self):
     validation_loss = self.adult_binary_class_gbdt.validation_loss()
-    self.assertAlmostEqual(validation_loss, 0.573842942, places=6)
+    self.assertAlmostEqual(validation_loss, 0.573842942, places=6)  # pyrefly: ignore[no-matching-overload]
 
   def test_validation_loss_if_no_validation_dataset(self):
     dataset = {"x": np.array([0, 0, 1, 1]), "y": np.array([0, 0, 0, 1])}
@@ -170,7 +267,7 @@ class GradientBoostedTreesTest(parameterized.TestCase):
 
   def test_initial_predictions(self):
     initial_predictions = self.adult_binary_class_gbdt.initial_predictions()
-    np.testing.assert_allclose(initial_predictions, [-1.1630996])
+    np.testing.assert_allclose(initial_predictions, [-1.1630996])  # pyrefly: ignore[no-matching-overload]
 
   @parameterized.parameters(
       "adult_binary_class_gbdt",
@@ -180,9 +277,9 @@ class GradientBoostedTreesTest(parameterized.TestCase):
   def test_set_initial_predictions(self, model_name):
     model = load_model(model_name)
     initial_predictions = model.initial_predictions()
-    model.set_initial_predictions(initial_predictions * 2.0)
-    np.testing.assert_allclose(
-        initial_predictions * 2, model.initial_predictions()
+    model.set_initial_predictions(initial_predictions * 2.0)  # pyrefly: ignore[unsupported-operation]
+    np.testing.assert_allclose(  # pyrefly: ignore[no-matching-overload]
+        initial_predictions * 2, model.initial_predictions()  # pyrefly: ignore[unsupported-operation]
     )
 
   def test_validation_evaluation_empty(self):
@@ -207,12 +304,12 @@ class GradientBoostedTreesTest(parameterized.TestCase):
     validation_evaluation = self.adult_binary_class_gbdt.validation_evaluation()
     self.assertIsNotNone(validation_evaluation)
     self.assertIsNone(validation_evaluation.accuracy)
-    self.assertAlmostEqual(validation_evaluation.loss, 0.57384294)
+    self.assertAlmostEqual(validation_evaluation.loss, 0.57384294)  # pyrefly: ignore[no-matching-overload]
 
   def test_validation_evaluation_with_content(self):
     validation_evaluation = self.gbt_adult_base_with_na.validation_evaluation()
     self.assertIsNotNone(validation_evaluation)
-    self.assertAlmostEqual(validation_evaluation.accuracy, 0.8498403)
+    self.assertAlmostEqual(validation_evaluation.accuracy, 0.8498403)  # pyrefly: ignore[no-matching-overload]
 
   def test_variable_importances_stored_in_model(self):
     model_path = os.path.join(
@@ -264,11 +361,11 @@ class GradientBoostedTreesTest(parameterized.TestCase):
         {
             "INV_MEAN_MIN_DEPTH": [
                 (0.823529411764706, "cat_str_0"),
-                (0.3409269442262372, "num_0"),
-                (0.33853354134165364, "num_2"),
+                (0.3409269442262373, "num_0"),
+                (0.3385335413416537, "num_2"),
                 (0.2407099278979479, "cat_str_1"),
                 (0.16596558317399618, "num_1"),
-                (0.15816326530612249, "cat_int_0"),
+                (0.15816326530612246, "cat_int_0"),
                 (0.15645277577505406, "num_3"),
                 (0.1550553769203287, "cat_int_1"),
             ],
@@ -320,6 +417,308 @@ class GradientBoostedTreesTest(parameterized.TestCase):
 
   def test_num_trees_per_iterations(self):
     self.assertEqual(self.adult_binary_class_gbdt.num_trees_per_iteration(), 1)
+
+  def test_early_stopping_triggered_is_none_when_field_is_not_available(self):
+    self.assertIsNone(self.adult_binary_class_gbdt.early_stopping_triggered())
+    self.assertIs(self.adult_binary_class_gbdt.early_stopping_triggered(), None)
+
+  def test_early_stopping_triggered_is_false_after_training(self):
+    dataset = {"x": np.array([0, 0, 1, 1]), "y": np.array([0, 0, 0, 1])}
+    model = specialized_learners.GradientBoostedTreesLearner(
+        label="y", validation_ratio=0.5, num_trees=2
+    ).train(dataset)
+    self.assertIsInstance(
+        model, gradient_boosted_trees_model.GradientBoostedTreesModel
+    )
+    self.assertIsNotNone(model.early_stopping_triggered())
+    self.assertFalse(model.early_stopping_triggered())
+
+  def test_early_stopping_triggered_is_true_after_training_triggers_it(
+      self,
+  ):
+    # This configuration triggers early stopping.
+    dataset = {"x": np.array([0, 0, 1, 1]), "y": np.array([0, 0, 1, 1])}
+    model = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        validation_ratio=0.5,
+        num_trees=5,
+        early_stopping_num_trees_look_ahead=1,
+        early_stopping_initial_iteration=1,
+    ).train(dataset)
+    self.assertIsInstance(
+        model, gradient_boosted_trees_model.GradientBoostedTreesModel
+    )
+    self.assertIsNotNone(model.early_stopping_triggered())
+    self.assertTrue(model.early_stopping_triggered())
+
+  def test_custom_metrics_binary_classification_is_set_successfully(self):
+    custom_accuracy = custom_metric.BinaryClassificationMetric(
+        name="threshold_accuracy",
+        evaluation_func=_evaluate_binary_threshold,
+    )
+    df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([2, 1, 1, 2] * 25),
+    })
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=1,
+        max_depth=4,
+        min_examples=1,
+        custom_metrics=[custom_accuracy],
+    )
+
+    model = learner.train(df)
+    self.assertIn(
+        "threshold_accuracy", model.validation_evaluation().custom_metrics
+    )
+    self.assertIn(
+        "threshold_accuracy",
+        model.training_logs()[0].training_evaluation.custom_metrics,
+    )
+
+  def test_multiple_custom_metrics_binary_classification_are_set_successfully(
+      self,
+  ):
+    custom_accuracy = custom_metric.BinaryClassificationMetric(
+        name="threshold_accuracy",
+        evaluation_func=_evaluate_binary_threshold,
+    )
+    custom_accuracy_2 = custom_metric.BinaryClassificationMetric(
+        name="threshold_accuracy_2",
+        evaluation_func=_evaluate_binary_threshold,
+    )
+    df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([2, 1, 1, 2] * 25),
+    })
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=1,
+        max_depth=4,
+        min_examples=1,
+        custom_metrics=[custom_accuracy, custom_accuracy_2],
+    )
+
+    model = learner.train(df)
+    self.assertIn(
+        "threshold_accuracy", model.validation_evaluation().custom_metrics
+    )
+    self.assertIn(
+        "threshold_accuracy_2", model.validation_evaluation().custom_metrics
+    )
+    self.assertIn(
+        "threshold_accuracy",
+        model.training_logs()[0].training_evaluation.custom_metrics,
+    )
+    self.assertIn(
+        "threshold_accuracy_2",
+        model.training_logs()[0].training_evaluation.custom_metrics,
+    )
+
+  def test_custom_metrics_binary_classification_errors_on_no_weights(self):
+    """Tests that the custom metric raises an error and does not segfault.
+
+    This happens because the metric expects a weight argument. But that argument
+    is set to an empty array when YDF trains without weights.
+    """
+    custom_accuracy = custom_metric.BinaryClassificationMetric(
+        name="threshold_accuracy",
+        evaluation_func=_evaluate_binary_threshold_no_weight_check,
+    )
+    df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([2, 1, 1, 2] * 25),
+    })
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=1,
+        max_depth=4,
+        min_examples=1,
+        custom_metrics=[custom_accuracy],
+    )
+
+    with self.assertRaisesRegex(
+        RuntimeError,
+        "UNKNOWN: Python function 'evaluation_func' raised: ValueError: "
+        r"operands could not be broadcast together with shapes \(0,\) \(94,\)",
+    ):
+      learner.train(df)
+
+  def test_custom_metrics_binary_classification_no_validation_data_is_set_successfully(
+      self,
+  ):
+    custom_accuracy = custom_metric.BinaryClassificationMetric(
+        name="threshold_accuracy",
+        evaluation_func=_evaluate_binary_threshold,
+    )
+    df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([2, 1, 1, 2] * 25),
+    })
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=1,
+        max_depth=4,
+        min_examples=1,
+        validation_ratio=0.0,
+        custom_metrics=[custom_accuracy],
+    )
+
+    model = learner.train(df)
+    self.assertIsNone(model.validation_evaluation())
+    self.assertIn(
+        "threshold_accuracy",
+        model.training_logs()[0].training_evaluation.custom_metrics,
+    )
+
+  def test_custom_metrics_multi_classification_is_set_successfully(self):
+    custom_accuracy = custom_metric.MultiClassificationMetric(
+        name="threshold_accuracy",
+        evaluation_func=_evaluate_multi_class_accuracy,
+    )
+    df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([2, 1, 1, 3] * 25),
+    })
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=1,
+        max_depth=4,
+        min_examples=1,
+        custom_metrics=[custom_accuracy],
+    )
+
+    model = learner.train(df)
+    self.assertIn(
+        "threshold_accuracy", model.validation_evaluation().custom_metrics
+    )
+    self.assertIn(
+        "threshold_accuracy",
+        model.training_logs()[0].training_evaluation.custom_metrics,
+    )
+
+  def test_custom_metrics_regression_is_set_successfully(self):
+    custom_rmse = custom_metric.RegressionMetric(
+        name="rmse-2",
+        evaluation_func=_evaluate_regression_rmse,
+    )
+    df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([0.5, 1.5, 2.5, 3.5] * 25),
+    })
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=1,
+        max_depth=4,
+        min_examples=1,
+        task=generic_model.Task.REGRESSION,
+        custom_metrics=[custom_rmse],
+    )
+
+    model = learner.train(df)
+    self.assertIn("rmse-2", model.validation_evaluation().custom_metrics)
+    self.assertIn(
+        "rmse-2",
+        model.training_logs()[0].training_evaluation.custom_metrics,
+    )
+
+  def test_custom_metrics_regression_non_symmetric(self):
+    custom_diff = custom_metric.RegressionMetric(
+        name="mean_diff",
+        evaluation_func=_evaluate_regression_mean_difference,
+    )
+    # Train data: labels mean = 2.0
+    train_df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([0.5, 1.5, 2.5, 3.5] * 25),
+    })
+    # Valid data: labels mean = 10.0
+    valid_df = pd.DataFrame({
+        "x": np.array([0, 0, 1, 1] * 25),
+        "y": np.array([8.5, 9.5, 10.5, 11.5] * 25),
+    })
+
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="y",
+        num_trees=1,
+        max_depth=1,
+        min_examples=1,
+        task=generic_model.Task.REGRESSION,
+        custom_metrics=[custom_diff],
+        validation_ratio=0.0,
+    )
+
+    model = learner.train(train_df, valid=valid_df)
+    val_metrics = model.validation_evaluation().custom_metrics
+    self.assertIn("mean_diff", val_metrics)
+    val_diff = val_metrics["mean_diff"]
+    self.assertLess(val_diff, 0.0, f"Expected negative diff, got {val_diff}")
+    self.assertAlmostEqual(val_diff, -8.0, delta=1.0)
+
+  def test_set_output_logits_classification(self):
+    dataset = pd.read_csv(
+        os.path.join(
+            test_utils.ydf_test_data_path(), "dataset", "adult_test.csv"
+        ),
+        nrows=10,
+    )
+    model = self.adult_binary_class_gbdt
+    # Predictions are probabilities if output_logits=False
+    model.set_output_logits(False)
+    self.assertFalse(model.output_logits())
+    proba_predictions = model.predict(dataset)
+    self.assertEqual(proba_predictions.shape, (10,))
+    npt.assert_array_less(proba_predictions, 1.001)
+    npt.assert_array_less(-0.001, proba_predictions)
+
+    # If output_logits=True, predictions are logits
+    model.set_output_logits(True)
+    self.assertTrue(model.output_logits())
+    logit_predictions = model.predict(dataset)
+    self.assertEqual(logit_predictions.shape, (10,))
+
+    # Check relation between logits and probabilities
+    def sigmoid(x):
+      return 1.0 / (1.0 + np.exp(-x))
+
+    npt.assert_allclose(
+        sigmoid(logit_predictions), proba_predictions, rtol=1e-5
+    )
+
+    # Setting output_logits back to False gives probabilities
+    model.set_output_logits(False)
+    self.assertFalse(model.output_logits())
+    proba_predictions_2 = model.predict(dataset)
+    npt.assert_allclose(proba_predictions_2, proba_predictions, rtol=1e-5)
+
+  def test_set_output_logits_regression_raises_error(self):
+    model = self.abalone_regression_gbdt
+    with self.assertRaisesRegex(
+        ValueError, "output_logits is only supported for classification tasks"
+    ):
+      model.output_logits()
+    with self.assertRaisesRegex(
+        ValueError, "output_logits is only supported for classification tasks"
+    ):
+      model.set_output_logits(True)
+
+  def test_set_output_logits_ranking_raises_error(self):
+    model = self.synthetic_ranking_gbdt
+    with self.assertRaisesRegex(
+        ValueError, "output_logits is only supported for classification tasks"
+    ):
+      model.output_logits()
+    with self.assertRaisesRegex(
+        ValueError, "output_logits is only supported for classification tasks"
+    ):
+      model.set_output_logits(True)
 
   def test_predict_distance(self):
     dataset = pd.read_csv(
@@ -432,7 +831,7 @@ class EditModelTest(absltest.TestCase):
 """,
     )
     bias = -0.693147
-    npt.assert_almost_equal(model.initial_predictions(), [bias], decimal=4)
+    npt.assert_almost_equal(model.initial_predictions(), [bias], decimal=4)  # pyrefly: ignore[bad-argument-type]
     npt.assert_almost_equal(
         model.predict(dataset),
         [
@@ -450,7 +849,7 @@ class EditModelTest(absltest.TestCase):
     model, dataset = self.create_model_and_dataset()
     tree = model.get_tree(0)
     assert isinstance(tree.root, node_lib.NonLeaf)
-    assert isinstance(tree.root.pos_child.pos_child, node_lib.Leaf)
+    assert isinstance(tree.root.pos_child.pos_child, node_lib.Leaf)  # pyrefly: ignore[missing-attribute]
     assert isinstance(
         tree.root.pos_child.pos_child.value, value_lib.RegressionValue
     )
@@ -631,6 +1030,7 @@ class EditModelTest(absltest.TestCase):
     model.remove_tree(0)
     self.assertEqual(model.num_trees(), 0)
     self.assertSequenceEqual(model.input_feature_names(), ["x1", "x2", "x3"])
+
 
 if __name__ == "__main__":
   absltest.main()

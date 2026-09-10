@@ -30,6 +30,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -268,6 +269,7 @@ absl::Status FinalizeModelWithValidationDataset(
                "'early_stopping=MIN_LOSS_FINAL'. (4) Disable early "
                "stopping completely with 'early_stopping=NONE'.";
       }
+      mdl->set_early_stopping_triggered(true);
     }
 
     // Final snippet
@@ -480,6 +482,40 @@ absl::Status GradientBoostedTreesLearner::CheckConfiguration(
         "use_hessian_gain=false.");
   }
 
+  if (gbt_config.min_sum_hessian_in_leaf() > 0 &&
+      !gbt_config.use_hessian_gain()) {
+    return absl::InvalidArgumentError(
+        "min_sum_hessian_in_leaf is only supported with use_hessian_gain=true.");
+  }
+
+  if (gbt_config.min_sum_hessian_in_leaf() < 0) {
+    return absl::InvalidArgumentError(
+        "min_sum_hessian_in_leaf must be non-negative.");
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status GradientBoostedTreesLearner::CheckCustomMetric(
+    const CustomMetric& custom_metric, model::proto::Task task) {
+  if (task == model::proto::Task::CLASSIFICATION) {
+    if (!std::holds_alternative<CustomMetricInt>(
+            custom_metric.evaluation_function)) {
+      return absl::InvalidArgumentError(
+          "Custom metric type not compatible with task=CLASSIFICATION.");
+    }
+  } else if (task == model::proto::Task::REGRESSION) {
+    if (!std::holds_alternative<CustomMetricFloat>(
+            custom_metric.evaluation_function)) {
+      return absl::InvalidArgumentError(
+          "Custom metric type not compatible with task=REGRESSION.");
+    }
+  } else {
+    return absl::InvalidArgumentError(
+        "Custom metric are not supported for any task other than "
+        "CLASSIFICATION or REGRESSION.");
+  }
+
   return absl::OkStatus();
 }
 
@@ -497,6 +533,10 @@ proto::LossConfiguration GradientBoostedTreesLearner::BuildLossConfiguration(
       break;
     case proto::GradientBoostedTreesTrainingConfig::kXeNdcg:
       loss_config.mutable_xe_ndcg()->CopyFrom(gbt_config.xe_ndcg());
+      break;
+    case proto::GradientBoostedTreesTrainingConfig::kMultinomialLossOptions:
+      loss_config.mutable_multinomial_loss()->CopyFrom(
+          gbt_config.multinomial_loss_options());
       break;
     case proto::GradientBoostedTreesTrainingConfig::LOSS_OPTIONS_NOT_SET:
       break;
@@ -544,6 +584,14 @@ absl::Status GradientBoostedTreesLearner::BuildAllTrainingConfiguration(
                  *all_config->gbt_config, all_config->train_config_link,
                  custom_loss_functions_));
 
+  // TODO: b/505089842 - Add support for custom metrics in ranking/survival
+  // task.
+  for (const auto& custom_metric : custom_metrics_) {
+    RETURN_IF_ERROR(
+        CheckCustomMetric(custom_metric, all_config->train_config.task()));
+    all_config->loss->RegisterCustomMetric(custom_metric);
+  }
+
   if (all_config->loss->RequireGroupingAttribute()) {
     if (!all_config->gbt_config->validation_set_group_feature().empty()) {
       return absl::InvalidArgumentError(
@@ -560,18 +608,16 @@ absl::Status GradientBoostedTreesLearner::BuildAllTrainingConfiguration(
     }
   }
 
-  int trees_per_iteration = all_config->loss->Shape().gradient_dim;
   int specified_num_trees = all_config->gbt_config->num_trees();
   int specified_initial_iteration =
       all_config->gbt_config->early_stopping_initial_iteration();
-  if (specified_initial_iteration * trees_per_iteration > specified_num_trees) {
-    LOG(WARNING)
-        << "The model configuration specifies " << specified_num_trees
-        << " trees but computation of the validation loss will only start "
-           "at iteration "
-        << specified_initial_iteration << " with " << trees_per_iteration
-        << " trees per iteration. No validation loss will be "
-           "computed, early stopping is not used.";
+  if (specified_initial_iteration > specified_num_trees) {
+    LOG(WARNING) << "The model is configured to train for "
+                 << specified_num_trees
+                 << " iterations, but early stopping is configured to start "
+                    "checking after iteration "
+                 << specified_initial_iteration << ". "
+                 << "Therefore, early stopping will not trigger.";
   }
 
   return absl::OkStatus();
@@ -789,7 +835,7 @@ GradientBoostedTreesLearner::ShardedSamplingTrain(
     auto time_begin_load = absl::Now();
     std::vector<std::string> selected_shards;
     {
-      utils::concurrency::MutexLock lock(&shard_random_mutex);
+      utils::concurrency::MutexLock lock(shard_random_mutex);
       selected_shards = SampleTrainingShards(
           training_shards, num_sample_train_shards, &shard_random);
     }
@@ -854,6 +900,9 @@ GradientBoostedTreesLearner::ShardedSamplingTrain(
     return absl::ToDoubleSeconds(time_accumulators.sum_duration_preprocess) /
            denominator;
   };
+
+  // Reset the early stopping flag. In all cases, the flag is set to false.
+  mdl->set_early_stopping_triggered(false);
 
   for (int iter_idx = 0; iter_idx < config.gbt_config->num_trees();
        iter_idx++) {
@@ -1414,6 +1463,10 @@ GradientBoostedTreesLearner::TrainWithStatusImpl(
     goss_weights = weights;
     tree_weights = &goss_weights;
   }
+
+  // Reset the early stopping flag. In all cases, the flag is set to false.
+  mdl->set_early_stopping_triggered(false);
+
   const auto begin_tree_grow = absl::Now();
   for (; iter_idx < config.gbt_config->num_trees(); iter_idx++) {
     // The user interrupted the training.
@@ -1640,6 +1693,7 @@ GradientBoostedTreesLearner::TrainWithStatusImpl(
       const auto now = absl::Now();
       const auto since_start =
           utils::FormatDurationForLogs(now - begin_tree_grow);
+      log_entry->set_time(absl::ToDoubleSeconds(now - begin_tree_grow));
       const auto time_per_tree =
           utils::FormatDurationForLogs(now - begin_iter_training);
       absl::StrAppendFormat(&snippet, " [total:%s iter:%s]", since_start,
@@ -1706,7 +1760,7 @@ GradientBoostedTreesLearner::TrainWithStatusImpl(
         (*mdl->mutable_decision_trees())[sub_iter_idx *
                                              mdl->num_trees_per_iter() +
                                          sub_tree_idx]
-            -> ScaleRegressorOutput(per_tree_weights[sub_iter_idx]);
+            ->ScaleRegressorOutput(per_tree_weights[sub_iter_idx]);
       }
     }
   }
@@ -1818,6 +1872,13 @@ absl::Status GradientBoostedTreesLearner::SetHyperParametersImpl(
     if (hparam.has_value()) {
       gbt_config->set_use_hessian_gain(hparam.value().value().categorical() ==
                                        "true");
+    }
+  }
+
+  {
+    const auto hparam = generic_hyper_params->Get(kHParamMinSumHessianInLeaf);
+    if (hparam.has_value()) {
+      gbt_config->set_min_sum_hessian_in_leaf(hparam.value().value().real());
     }
   }
 
@@ -2026,6 +2087,16 @@ absl::Status GradientBoostedTreesLearner::SetHyperParametersImpl(
     }
   }
 
+  {
+    const auto hparam =
+        generic_hyper_params->Get(kHParamMultinomialInitializeClassPriors);
+    if (hparam.has_value()) {
+      gbt_config->mutable_multinomial_loss_options()
+          ->set_initialize_with_class_priors(
+              hparam.value().value().categorical() == "true");
+    }
+  }
+
   return absl::OkStatus();
 }
 
@@ -2135,7 +2206,7 @@ GradientBoostedTreesLearner::PredefinedHyperParameterSpace() const {
     cands->add_possible_values()->set_integer(20);
   }
 
-  if (training_config_.task() != model::proto::Task::REGRESSION) {
+  {
     auto* field = space.add_fields();
     field->set_name(kHParamUseHessianGain);
     auto* cands = field->mutable_discrete_candidates();
@@ -2321,7 +2392,20 @@ GradientBoostedTreesLearner::GetGenericHyperParameterSpecification() const {
     param.mutable_categorical()->add_possible_values("false");
     param.mutable_documentation()->set_proto_path(proto_path);
     param.mutable_documentation()->set_description(
-        R"(If true, uses a formulation of split gain with a hessian term i.e. optimizes the splits to minimize the variance of "gradient / hessian. Available for all losses except regression.)");
+        R"(If true, uses a formulation of split gain with a hessian term i.e. optimizes the splits to minimize the variance of "gradient / hessian.)");
+  }
+
+  {
+    auto& param =
+        hparam_def.mutable_fields()->operator[](kHParamMinSumHessianInLeaf);
+    param.mutable_real()->set_minimum(0.f);
+    param.mutable_real()->set_default_value(
+        gbt_config.min_sum_hessian_in_leaf());
+    param.mutable_conditional()->set_control_field(kHParamUseHessianGain);
+    param.mutable_conditional()->mutable_categorical()->add_values("true");
+    param.mutable_documentation()->set_proto_path(proto_path);
+    param.mutable_documentation()->set_description(
+        R"(Minimum value of the sum of the hessians in the leafs. Splits that would violate this constraint are ignored. For some regression losses, this is equal to the minimum number of examples in a leaf, since all hessians are 1.0. Setting this to a value larger than 0.0 makes splitting less aggressive.Only used when `use_hessian_gain` is true. Independently of this constraint, the hessian used in the Newton step denominator is clamped to 0.001 for numerical stability.)");
   }
 
   {
@@ -2486,6 +2570,8 @@ For example, in the case of binary classification, the pre-link function output 
         kHParamXENDCGTruncation);
     param.mutable_mutual_exclusive()->add_other_parameters(
         kHParamNDCGTruncation);
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamMultinomialInitializeClassPriors);
   }
 
   {
@@ -2502,6 +2588,8 @@ For example, in the case of binary classification, the pre-link function output 
         kHParamXENDCGTruncation);
     param.mutable_mutual_exclusive()->add_other_parameters(
         kHParamNDCGTruncation);
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamMultinomialInitializeClassPriors);
   }
 
   {
@@ -2519,6 +2607,8 @@ For example, in the case of binary classification, the pre-link function output 
         kHParamFocalLossAlpha);
     param.mutable_mutual_exclusive()->add_other_parameters(
         kHParamFocalLossGamma);
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamMultinomialInitializeClassPriors);
   }
 
   {
@@ -2536,6 +2626,30 @@ For example, in the case of binary classification, the pre-link function output 
         kHParamFocalLossAlpha);
     param.mutable_mutual_exclusive()->add_other_parameters(
         kHParamFocalLossGamma);
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamMultinomialInitializeClassPriors);
+  }
+
+  {
+    auto& param = hparam_def.mutable_fields()->operator[](
+        kHParamMultinomialInitializeClassPriors);
+    param.mutable_categorical()->set_default_value(
+        gbt_config.multinomial_loss_options().initialize_with_class_priors()
+            ? "true"
+            : "false");
+    param.mutable_categorical()->add_possible_values("true");
+    param.mutable_categorical()->add_possible_values("false");
+    param.mutable_documentation()->set_proto_path(proto_path);
+    param.mutable_documentation()->set_description(
+        R"(Only for multinomial classification loss. If false (default), the initial prediction (bias) of the model is 0 for all classes. If true, the initial prediction is set to the logarithm of class priors i.e. log(P(y=i)). Initializing with class priors is equivalent to starting boosting from a constant model that predicts the marginal distribution of the label. This can result in faster convergence on some datasets, but it may also trigger early stopping prematurely in other cases.)");
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamNDCGTruncation);
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamFocalLossAlpha);
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamFocalLossGamma);
+    param.mutable_mutual_exclusive()->add_other_parameters(
+        kHParamXENDCGTruncation);
   }
 
   {
@@ -2574,13 +2688,14 @@ decision_tree::InternalTrainConfig BuildWeakLearnerInternalConfig(
                                                gradients[grad_idx]);
 
   internal_config.hessian_score = config.gbt_config->use_hessian_gain();
-  internal_config.hessian_leaf = true;
   internal_config.gradient_col_idx = gradients[grad_idx].gradient_col_idx;
   internal_config.hessian_col_idx = gradients[grad_idx].hessian_col_idx;
   internal_config.hessian_l1 = config.gbt_config->l1_regularization();
   internal_config.hessian_l2_numerical = config.gbt_config->l2_regularization();
   internal_config.hessian_l2_categorical =
       config.gbt_config->l2_regularization_categorical();
+  internal_config.min_sum_hessian_in_leaf =
+      config.gbt_config->min_sum_hessian_in_leaf();
   internal_config.duplicated_selected_examples = false;
   internal_config.timeout = timeout;
   internal_config.split_finder_processor = split_finder_processor;
@@ -2936,11 +3051,14 @@ void SampleTrainingExamplesWithGoss(
   }
 
   // From the remaining examples, randomly select a subset and adjust weights.
-  if (beta > 0) {
+  if (beta > 0. && alpha < 1.) {
+    // Paper and reference implementation both impose that a beta fraction of
+    // the ENTIRE data are used, so we must scale the probability accordingly.
+    const float sampling_rate = beta / (1.f - alpha);
     const float amplification_factor = (1.f - alpha) / beta;
     std::uniform_real_distribution<float> unif_dist_unit;
     for (UnsignedExampleIdx idx = cutoff; idx < num_rows; idx++) {
-      if (unif_dist_unit(*random) < beta) {
+      if (unif_dist_unit(*random) < sampling_rate) {
         const UnsignedExampleIdx example_idx = l1_norm[idx].first;
         selected_examples->push_back(example_idx);
         (*weights)[example_idx] *= amplification_factor;
@@ -2954,6 +3072,10 @@ void SampleTrainingExamplesWithGoss(
         std::uniform_int_distribution<UnsignedExampleIdx>(num_rows -
                                                           1)(*random));
   }
+
+  // Sort selected examples by example index, since downstream users of selected
+  // examples assume this array to be sorted.
+  std::sort(selected_examples->begin(), selected_examples->end());
 }
 
 absl::Status SampleTrainingExamplesWithSelGB(
@@ -3002,6 +3124,10 @@ absl::Status SampleTrainingExamplesWithSelGB(
       selected_examples->push_back(negative_predictions[idx].first);
     }
   }
+
+  // Sort selected examples by example index, since downstream users of selected
+  // examples assume this array to be sorted.
+  std::sort(selected_examples->begin(), selected_examples->end());
   return absl::OkStatus();
 }
 
@@ -3256,7 +3382,10 @@ absl::Status SetDefaultHyperParameters(
     gbt_config->clear_subsample();
   } else {
     // No sub-sampling.
-    gbt_config->mutable_stochastic_gradient_boosting();
+    if (gbt_config->sampling_methods_case() ==
+        proto::GradientBoostedTreesTrainingConfig::SAMPLING_METHODS_NOT_SET) {
+      gbt_config->mutable_stochastic_gradient_boosting();
+    }
   }
 
   if (gbt_config->early_stopping() !=

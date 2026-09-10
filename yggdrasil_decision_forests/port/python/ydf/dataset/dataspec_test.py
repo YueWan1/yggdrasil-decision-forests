@@ -88,7 +88,7 @@ def toy_dataspec():
   )
 
 
-class DataspecTest(absltest.TestCase):
+class DataspecTest(parameterized.TestCase):
 
   def test_categorical_column_dictionary_to_list(self):
     dataspec = toy_dataspec()
@@ -117,11 +117,11 @@ class DataspecTest(absltest.TestCase):
     )
     str_defs_positive = ["foo", "target", "bar", "", "*"]
     self.assertTrue(
-        dataspec_lib.column_defs_contains_column(column_name, str_defs_positive)
+        dataspec_lib.column_defs_contains_column(column_name, str_defs_positive)  # pyrefly: ignore[bad-argument-type]
     )
     str_defs_negative = ["foo", "tar", "bar", "", "*"]
     self.assertFalse(
-        dataspec_lib.column_defs_contains_column(column_name, str_defs_negative)
+        dataspec_lib.column_defs_contains_column(column_name, str_defs_negative)  # pyrefly: ignore[bad-argument-type]
     )
     tuple_defs_positive = [
         ("foo", Semantic.NUMERICAL),
@@ -129,7 +129,7 @@ class DataspecTest(absltest.TestCase):
     ]
     self.assertTrue(
         dataspec_lib.column_defs_contains_column(
-            column_name, tuple_defs_positive
+            column_name, tuple_defs_positive  # pyrefly: ignore[bad-argument-type]
         )
     )
     tuple_defs_negative = [
@@ -138,21 +138,42 @@ class DataspecTest(absltest.TestCase):
     ]
     self.assertFalse(
         dataspec_lib.column_defs_contains_column(
-            column_name, tuple_defs_negative
+            column_name, tuple_defs_negative  # pyrefly: ignore[bad-argument-type]
         )
     )
     column_defs_positive = [Column("foo"), Column("target")]
     self.assertTrue(
         dataspec_lib.column_defs_contains_column(
-            column_name, column_defs_positive
+            column_name, column_defs_positive  # pyrefly: ignore[bad-argument-type]
         )
     )
     column_defs_negative = [Column("foo"), Column("tar")]
     self.assertFalse(
         dataspec_lib.column_defs_contains_column(
-            column_name, column_defs_negative
+            column_name, column_defs_negative  # pyrefly: ignore[bad-argument-type]
         )
     )
+
+  def test_integerized_categorical_feature(self):
+    # Valid
+    _ = Column("a", Semantic.CATEGORICAL, is_already_integerized=True)
+    _ = Column("a", Semantic.CATEGORICAL, is_already_integerized=False)
+    _ = Column("a", Semantic.CATEGORICAL)
+    _ = Column("a")
+
+  @parameterized.parameters(
+      Semantic.NUMERICAL,
+      Semantic.BOOLEAN,
+      Semantic.HASH,
+      Semantic.CATEGORICAL_SET,
+      Semantic.DISCRETIZED_NUMERICAL,
+  )
+  def test_integerized_categorical_feature_invalid_semantic(self, semantic):
+    with self.assertRaisesRegex(
+        ValueError,
+        "Argument is_already_integerized requires semantic=CATEGORICAL.",
+    ):
+      _ = Column("a", semantic, is_already_integerized=True)
 
   def test_categorical_column_guide(self):
     self.assertEqual(

@@ -20,10 +20,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -35,12 +37,67 @@
 #include "yggdrasil_decision_forests/model/decision_tree/decision_tree.pb.h"
 #include "yggdrasil_decision_forests/model/decision_tree/structure_analysis.h"
 #include "yggdrasil_decision_forests/serving/embed/embed.pb.h"
+#include "yggdrasil_decision_forests/serving/embed/ir/model_ir.h"
 
 namespace yggdrasil_decision_forests::serving::embed {
 typedef std::string Filename;
 typedef std::string Content;
 
 namespace internal {
+
+// Options used internally by the code generation.
+// These options are common to all language exports.
+struct BaseInternalOptions {
+  // Number of bytes to encode a fixed-size feature.
+  // Note: Currently, all the fixed-size features are encoded with the same
+  // precision (e.g. all the numerical and categorical values are encoded with
+  // the same number of bytes). Can be 1, 2, or 4.
+  int feature_value_bytes = 0;
+
+  // If the numerical features are encoded as float. In this case
+  // feature_value_bytes=4 (currently). If false, numerical features are encoded
+  // as ints, and "feature_value_bytes" specify the precision.
+  bool numerical_feature_is_float = false;
+
+  // Number of bytes to encode a feature index.
+  int feature_index_bytes = 0;
+
+  // Number of bytes to encode a tree index.
+  int tree_index_bytes = 0;
+
+  // Number of bytes to encode a node index withing a tree.
+  int node_offset_bytes = 0;
+
+  // Number of bytes to encode an index in the categorical mask bank.
+  // Note: This value is currently inferred from
+  // "sum_size_categorical_bitmap_masks", which assume the bank is not
+  // compressed / optimized in any way.
+  int categorical_idx_bytes = 0;
+
+  // The type returned by the prediction function.
+  std::string output_type;
+
+  // Mapping from a column idx to a dense index of the model input features. If
+  // a column is not a feature, the corresponding value is -1.
+  std::vector<int> column_idx_to_feature_idx;
+
+  // Mapping between column idx of a categorical-string column, to the sanitized
+  // dictionary of possible values.
+  struct CategoricalDict {
+    // Name of the column
+    std::string sanitized_name;
+    // Possible values sanitized so they can be used as c++ variable names.
+    std::vector<std::string> sanitized_items;
+    // Possible values
+    std::vector<std::string> items;
+    // If this column a label.
+    bool is_label;
+  };
+  absl::btree_map<int, CategoricalDict> categorical_dicts;
+  // If true, the model contains integerized categorical features.
+  bool has_integerized_categorical = false;
+};
+
 // Statistics about the model.
 struct ModelStatistics {
   // Number of trees.
@@ -78,7 +135,7 @@ struct ModelStatistics {
 
   // True if "has_conditions" contains more than one true value i.e. the model
   // has more than one type of condition.
-  bool has_multiple_condition_types;
+  bool has_multiple_condition_types = false;
 
   bool is_classification() const {
     return task == model::proto::Task::CLASSIFICATION;
@@ -98,6 +155,7 @@ static constexpr int kReservedFeatureIndexes = 1;
 
 // Index of the condition types supported by the routing algorithm.
 enum class RoutingConditionType {
+  kUndefined = -1,
   HIGHER_CONDITION = 0,
   CONTAINS_CONDITION_BUFFER_BITMAP = 1,
   OBLIQUE_CONDITION = 2,
@@ -145,7 +203,7 @@ struct ValueBank {
 struct RoutingConditionCode {
   // Condition type. Used to determine if the code is needed for the model.
   // Also, used to define "cond" if not provided by the user.
-  RoutingConditionType type;
+  RoutingConditionType type = RoutingConditionType::kUndefined;
 
   // Code expression that tests if the condition should be evaluated e.g.
   // "node->cond.feat == 2".
@@ -191,13 +249,121 @@ struct SpecializedConversion {
   std::string routing_node;
 
   // Validate the object.
-  absl::Status Validate() const;
+  absl::Status Validate(const proto::Options& options) const;
 };
+
+// All types used for in the emitted code.
+//
+// If an object is two-dimensional (vector / array / ...), only stores the base
+// Type. This struct only stores the base types, not aliases such as
+// `Numerical`.
+struct BaseTypes {
+  // Global
+  std::string num_trees;
+  std::string accumulator;
+  std::string eval;  // Evaluation of a routing condition.
+  std::string boolean;
+  std::string output;  // Return value or output parameter.
+
+  // Instance
+  std::string numerical_feature;
+  std::string categorical_feature;
+  std::string integerized_categorical_feature;
+
+  // Node data structure.
+  std::string pos;
+  std::string feature_idx;
+  std::string threshold;
+  std::string cat_bank_idx;
+  std::string obl_bank_idx;
+  std::string leaf_value;
+
+  // Banks
+  std::string categorical_bank;
+  std::string condition_types;
+  std::string root_deltas;
+  std::string oblique_weights;
+  std::string oblique_features;
+  std::string feature_offsets;
+  std::string leaf_value_bank;
+};
+
+// Common IR data extracted from ModelIR for the Routing algorithm.
+struct RoutingDataAssets {
+  std::string root_deltas_content;
+
+  size_t categorical_bank_size = 0;
+
+  std::string oblique_weights_content;
+  std::string oblique_features_content;
+  std::string leaf_value_bank_content;
+};
+
+// Evaluates shared assets needed for text generation on routing target
+// lowering.
+absl::StatusOr<RoutingDataAssets> PrepareRoutingDataAssets(const ModelIR& ir);
 
 // Computes the statistics of the model.
 absl::StatusOr<ModelStatistics> ComputeStatistics(
     const model::AbstractModel& model,
     const model::DecisionForestInterface& df_interface);
+
+// Populates the feature parts of the internal option.
+absl::Status ComputeBaseInternalOptionsFeature(
+    const ModelStatistics& stats, const model::AbstractModel& model,
+    const proto::Options& options, BaseInternalOptions* out);
+
+// Populates the categorical dictionary parts of the internal option.
+absl::Status ComputeBaseInternalOptionsCategoricalDictionaries(
+    const model::AbstractModel& model, const ModelStatistics& stats,
+    const proto::Options& options, BaseInternalOptions* out);
+
+// Computes the mapping from feature idx to condition type.
+//
+// Record a mapping from feature to condition type. This is possible because
+// this implementation assumes that each feature is only used in one type of
+// condition (which is not generally the case in YDF).
+//
+// TODO: Use a virtual feature index system to allow a same feature to be
+// used with different condition types.
+absl::StatusOr<std::vector<uint8_t>> GenRoutingModelDataConditionType(
+    const model::AbstractModel& model, const ModelStatistics& stats);
+
+// Reserved feature index used for oblique conditions.
+int ObliqueFeatureIndex(const proto::Options& options,
+                        const BaseInternalOptions& internal_options);
+
+// Resolves name collisions by appending a suffix to the name until it is
+// unique.
+std::string ResolveNameCollision(
+    const std::string& name,
+    const absl::flat_hash_set<std::string>& existing_names);
+
+// Gets the sentinel value for the oblique feature index.
+uint32_t GetObliqueFeatureSentinel(int64_t num_features);
+
+// Gets the encoded leaf value for vector leaves.
+int GetEncodedLeafValue(int64_t offset, int num_output_classes);
+
+// Maps storage requirements to C/C++ primitive types (e.g., int8_t, float).
+absl::StatusOr<std::string> StorageToType(int bytes, bool is_float,
+                                          bool is_signed);
+
+// Generates the string representation of the bitset bank (reversed).
+std::string GetBitsetBankString(const std::vector<bool>& bitset_bank);
+
+// Calculates the maximum value in the oblique features vector.
+int GetMaxObliqueFeatureValue(const std::vector<int>& oblique_features);
+
+// Checks if a feature variable name collides with existing sanitized names.
+absl::Status CheckFeatureNameCollision(
+    const std::string& var_name,
+    absl::flat_hash_set<std::string>& sanitized_feature_names,
+    const std::vector<FeatureInfo>& features);
+
+absl::StatusOr<BaseTypes> BuildTypes(const proto::Options& options,
+                                     const ModelIR& model_ir,
+                                     std::string pseudo_namespace = "");
 }  // namespace internal
 }  // namespace yggdrasil_decision_forests::serving::embed
 

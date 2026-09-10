@@ -1,4 +1,5 @@
-# pytype test and library
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -21,6 +22,7 @@ py_library(
         "//ydf/dataset",
         "//ydf/dataset:dataspec",
         "//ydf/learner:custom_loss_py",
+        "//ydf/learner:custom_metric_py",
         "//ydf/learner:feature_selector",
         "//ydf/learner:generic_learner",
         "//ydf/learner:specialized_learners",

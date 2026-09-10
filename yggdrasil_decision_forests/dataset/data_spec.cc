@@ -15,6 +15,8 @@
 
 #include "yggdrasil_decision_forests/dataset/data_spec.h"
 
+#include <stdbool.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -139,10 +141,8 @@ int32_t NonintegerizedCategoricalStringToValue(absl::string_view value,
   }
 }
 
-// TODO: Remove this version when external protobuffer supports dictionary
-// query with absl::string_view.
 absl::StatusOr<int32_t> CategoricalStringToValueWithStatus(
-    const std::string& value, const proto::Column& col_spec) {
+    absl::string_view value, const proto::Column& col_spec) {
   if (col_spec.categorical().is_already_integerized()) {
     int32_t int_value;
     if (!absl::SimpleAtoi(value, &int_value)) {
@@ -390,12 +390,27 @@ absl::Status CsvRowToExample(const std::vector<std::string>& csv_fields,
         if (value.empty()) {
           break;
         }
-        float num_value;
-        if (!absl::SimpleAtof(value, &num_value)) {
-          return absl::InvalidArgumentError(
-              absl::StrCat("Cannot parse: ", value));
+        if (value.size() == 1) {
+          if (value[0] == '1') {
+            dst_value->set_boolean(true);
+            break;
+          } else if (value[0] == '0') {
+            dst_value->set_boolean(false);
+            break;
+          }
         }
-        dst_value->set_boolean(num_value >= 0.5f);
+        if (value == "True" || value == "true") {
+          dst_value->set_boolean(true);
+        } else if (value == "False" || value == "false") {
+          dst_value->set_boolean(false);
+        } else {
+          float num_value;
+          if (!absl::SimpleAtof(value, &num_value)) {
+            return absl::InvalidArgumentError(
+                absl::StrCat("Cannot parse: ", value, " as a boolean."));
+          }
+          dst_value->set_boolean(num_value >= 0.5f);
+        }
       } break;
       case ColumnType::STRING:
         *dst_value->mutable_text() = std::string{value};

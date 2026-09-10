@@ -69,6 +69,8 @@ class WarningMessage(enum.Enum):
   TRAINING_NEURAL_NET_WITHOUT_VALID = 13
   TRAIN_TRANSFORMER_ON_CPU = 14
   AD_PERMUTATION_VARIABLE_IMPORTANCE_NOT_ENABLED = 15
+  CAST_INTEGERIZED_CATEGORICAL_TO_INT32 = 16
+  USING_TFDF_FOR_EXPORT = 17
 
 
 # List of already showed warning message that should not be displayed again.
@@ -348,7 +350,7 @@ T = TypeVar("T")
 
 
 def maybe_tqdm(iterable: Iterator[T], *args, **kwargs) -> Iterator[T]:
-  """Shows a tqdm progress bar if tqdm is installed and loggin level>=1."""
+  """Shows a tqdm progress bar if tqdm is installed and logging level>=1."""
 
   if _VERBOSE_LEVEL == 0:
     return iterable
@@ -359,6 +361,6 @@ def maybe_tqdm(iterable: Iterator[T], *args, **kwargs) -> Iterator[T]:
     import tqdm
     # pytype: enable=import-error
     # pylint: enable=g-import-not-at-top
-    return tqdm.tqdm(iterable, *args, **kwargs)
+    return tqdm.tqdm(iterable, *args, **kwargs)  # pyrefly: ignore[bad-return]
   except ImportError:
     return iterable

@@ -19,6 +19,7 @@ package yggdrasil_decision_forests.model.proto;
 
 import "yggdrasil_decision_forests/dataset/weight.proto";
 import "yggdrasil_decision_forests/model/hyperparameter.proto";
+import "yggdrasil_decision_forests/model/postprocessor/postprocessor.proto";
 
 // Modeling task.
 enum Task {
@@ -110,9 +111,11 @@ message AbstractModel {
   // Logs of the automated feature selection of the model.
   optional FeatureSelectionLogs feature_selection_logs = 13;
 
-  // Indicate if a model is pure for serving i.e. the model was tripped of all
+  // Indicate if a model is pure for serving i.e. the model was stripped of all
   // information not required for serving.
   optional bool is_pure_model = 12 [default = false];
+
+  repeated postprocessor.proto.Postprocessor postprocessors = 16;
 }
 
 // Information about the model.
@@ -162,6 +165,9 @@ message HyperparametersOptimizerLogs {
   //  Registered key for the hyperparameter optimizer.
   optional string hyperparameter_optimizer_key = 3;
 
+  // Link to the user interface of the tuner.
+  optional string tuner_link = 6;
+
   // The selected hyperparameters and its score.
   //
   // Note: It is possible that the best hyperparameters are not part of the
@@ -171,14 +177,14 @@ message HyperparametersOptimizerLogs {
 
   message Step {
     // Time, in seconds, relative to the start of the hyper-parameter tuning, of
-    // the consuption of the hyperparameters evaluation.
+    // the evaluation of the hyperparameters.
     optional double evaluation_time = 1;
 
     // Tested hyperparameters.
     optional GenericHyperParameters hyperparameters = 2;
 
     // Score (the higher, the better) of the hyperparameters.
-    // A NaN value indicates that the hyperparameters are unfeasible.
+    // A NaN value indicates that the hyperparameters are infeasible.
     optional float score = 3;
   }
 }

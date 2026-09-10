@@ -62,7 +62,7 @@ def read_tf_record(
           compression_type="GZIP" if compressed else "",
           buffer_size=10_000_000,
       ):
-        yield tensor.numpy()
+        yield tensor.numpy()  # pyrefly: ignore[invalid-yield]
 
     @contextlib.contextmanager
     def cm():
@@ -144,7 +144,7 @@ def _read_shard(
   """
 
   # Map to each column name, the list of observed values and the missing value.
-  local_data: Dict[str, Tuple[List[Any], ColumnSpec]] = {}
+  local_data: Dict[str, Tuple[List[Any], ColumnSpec, Optional[np.dtype]]] = {}
   local_num_examples = 0
 
   if verbose:
@@ -159,7 +159,7 @@ def _read_shard(
 
       # Columns without values for this example
       example_keys = set(example.features.feature.keys())
-      for key, (values, spec) in local_data.items():
+      for key, (values, spec, _) in local_data.items():
         if key in example_keys:
           continue
         values.append(spec.default_value)
@@ -168,9 +168,11 @@ def _read_shard(
       for key, value in example.features.feature.items():
         dst_value = None
         single_default_value = None
+        dtype = None
         if value.HasField("float_list"):
           dst_value = value.float_list.value
           single_default_value = math.nan
+          dtype = np.float64
         elif value.HasField("bytes_list"):
           dst_value = value.bytes_list.value
           single_default_value = b""
@@ -197,12 +199,13 @@ def _read_shard(
             dim = len(dst_value)
             # This is a new column
             default_value = [single_default_value] * dim
-            local_data[key] = (
+            local_data[key] = (  # pyrefly: ignore[unsupported-operation]
                 [default_value] * local_num_examples,
                 ColumnSpec(
                     default_value=default_value,
                     dim=dim,
                 ),
+                dtype,
             )
 
           local_data[key][0].append(dst_value)
@@ -215,10 +218,10 @@ def _read_shard(
 
   return local_num_examples, {
       key: (
-          np.array(values),
+          np.array(values, dtype=dtype),
           ColumnSpec(default_value=np.array(spec.default_value), dim=spec.dim),
       )
-      for key, (values, spec) in local_data.items()
+      for key, (values, spec, dtype) in local_data.items()
   }
 
 
@@ -293,10 +296,10 @@ def read_tensorflow_examples(
 
   # Finalize the shard aggregation
   def finalize_data(value: List[np.ndarray]) -> np.ndarray:
-    value = np.concatenate(value, axis=0)
-    if value.shape[1] == 1:
-      value = np.squeeze(value, axis=1)
-    return value
+    np_value = np.concatenate(value, axis=0)
+    if np_value.shape[1] == 1:
+      np_value = np.squeeze(np_value, axis=1)
+    return np_value
 
   return {key: finalize_data(values) for key, (values, _) in data.items()}
 

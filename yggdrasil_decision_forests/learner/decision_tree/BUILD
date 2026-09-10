@@ -66,7 +66,7 @@ cc_library_ydf(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:optional",
         "@com_google_absl//absl/types:span",
-        "@eigen_archive//:eigen3_internal",
+        "@eigen",
     ] + select({
         "//conditions:default": [
         ],
@@ -136,7 +136,6 @@ cc_library_ydf(
         "//yggdrasil_decision_forests/model/decision_tree:decision_tree_cc_proto",
         "//yggdrasil_decision_forests/utils:cast",
         "//yggdrasil_decision_forests/utils:circular_buffer",
-        "//yggdrasil_decision_forests/utils:compatibility",
         "//yggdrasil_decision_forests/utils:concurrency",
         "//yggdrasil_decision_forests/utils:distribution",
         "//yggdrasil_decision_forests/utils:distribution_cc_proto",
@@ -151,7 +150,10 @@ cc_library_ydf(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:optional",
         "@com_google_absl//absl/types:span",
-        "@eigen_archive//:eigen3_internal",
+        "@com_google_highway//:hwy",
+        "@com_google_highway//hwy/contrib/sort:vqsort",
+        "@com_google_highway//hwy/contrib/sort:vqsort_shared",
+        "@eigen",
     ] + select({
         "//conditions:default": [
         ],
@@ -266,6 +268,7 @@ cc_test(
         ":generic_parameters",
         ":label",
         ":preprocessing",
+        ":splitter",
         ":training",
         ":uplift",
         ":utils",

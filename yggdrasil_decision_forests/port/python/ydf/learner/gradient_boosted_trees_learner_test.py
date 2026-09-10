@@ -213,6 +213,27 @@ class GradientBoostedTreesLearnerTest(learner_test_utils.LearnerTest):
     ):
       _ = learner.train(ds)
 
+  def test_min_sum_hessian_in_leaf(self):
+    learner = specialized_learners.GradientBoostedTreesLearner(
+        label="income",
+        num_trees=5,
+        use_hessian_gain=True,
+        min_sum_hessian_in_leaf=1e9,
+    )
+    model = learner.train(self.adult.train)
+    # Total dataset hessian is less than 1e9, so no splits are possible.
+    # All trees must have only a root leaf node.
+    for tree in model.get_all_trees():
+      self.assertTrue(tree.root.is_leaf)
+
+  def test_min_sum_hessian_in_leaf_negative_fails(self):
+    with self.assertRaises(test_utils.AbslInvalidArgumentError):
+      _ = specialized_learners.GradientBoostedTreesLearner(
+          label="income",
+          use_hessian_gain=True,
+          min_sum_hessian_in_leaf=-1.0,
+      ).train(self.adult.train)
+
   def test_monotonic_training(self):
     learner = specialized_learners.GradientBoostedTreesLearner(
         label="income",
@@ -368,9 +389,9 @@ class GradientBoostedTreesLearnerTest(learner_test_utils.LearnerTest):
     self.assertEqual(age_spec.name, "age")
     self.assertEqual(age_spec.type, ds_pb.ColumnType.DISCRETIZED_NUMERICAL)
 
-    self.assertLess(evaluation.accuracy, 0.8746)
-    self.assertGreater(evaluation.loss, 0.28042)
-    self.assertLess(evaluation.loss, 0.30802)
+    self.assertLess(evaluation.accuracy, 0.8746)  # pyrefly: ignore[no-matching-overload]
+    self.assertGreater(evaluation.loss, 0.28042)  # pyrefly: ignore[no-matching-overload]
+    self.assertLess(evaluation.loss, 0.30802)  # pyrefly: ignore[no-matching-overload]
 
   @parameterized.parameters(
       (np.array([0, 0, 0, 1, 1]),),
@@ -521,7 +542,7 @@ class GradientBoostedTreesLearnerTest(learner_test_utils.LearnerTest):
     logs = model.hyperparameter_optimizer_logs()
     self.assertIsNotNone(logs)
     self.assertLen(logs.trials, 5)
-    self.assertGreater(logs.trials[0].score, 0)
+    self.assertGreater(logs.trials[0].score, 0)  # pyrefly: ignore[no-matching-overload]
 
   def test_label_type_error_message(self):
     with self.assertRaisesRegex(
@@ -541,15 +562,16 @@ class GradientBoostedTreesLearnerTest(learner_test_utils.LearnerTest):
           label="l", task=generic_learner.Task.REGRESSION
       ).train(pd.DataFrame({"l": ["A", "B"], "f": [0, 1]}))
 
-  @parameterized.parameters(
-      ("LOCAL",),
-      ("BEST_FIRST_GLOBAL",),
+  @parameterized.product(
+      growing_strategy=["LOCAL", "BEST_FIRST_GLOBAL"],
+      weighted=[False, True],
   )
-  def test_shap_adult(self, growing_strategy):
+  def test_shap_adult(self, growing_strategy: str, weighted: bool):
     model = specialized_learners.GradientBoostedTreesLearner(
         label="income",
         num_trees=20,
         growing_strategy=growing_strategy,
+        weights="age" if weighted else None,
     ).train(self.adult.train_pd)
 
     shape_values, initial_values = model.predict_shap(self.adult.test_pd)

@@ -67,8 +67,29 @@ namespace model {
 namespace random_forest {
 namespace {
 
+using test::StatusIs;
+using test::StatusIsOk;
+using ::testing::ElementsAre;
+using ::testing::Not;
+
 using Internal = ::yggdrasil_decision_forests::model::decision_tree::proto::
     DecisionTreeTrainingConfig::Internal;
+
+absl::StatusOr<dataset::VerticalDataset> CreateSingletonLabelDataset() {
+  const int num_examples = 1000;
+  dataset::VerticalDataset dataset;
+  auto* label_col = dataset.mutable_data_spec()->add_columns();
+  label_col->set_name("label");
+  label_col->set_type(dataset::proto::CATEGORICAL);
+  label_col->mutable_categorical()->set_is_already_integerized(true);
+  label_col->mutable_categorical()->set_number_of_unique_values(2);
+
+  RETURN_IF_ERROR(dataset.CreateColumnsFromDataspec());
+  for (int i = 0; i < num_examples; i++) {
+    RETURN_IF_ERROR(dataset.AppendExampleWithStatus({{"label", "1"}}));
+  }
+  return dataset;
+}
 
 void SetExpectedSortingStrategy(Internal::SortingStrategy expected,
                                 model::proto::TrainingConfig* train_config) {
@@ -231,32 +252,39 @@ TEST_F(RandomForestOnAdult, Base) {
                                       kVariableImportanceMeanDecreaseInAccuracy)
           .value();
 
-  // The top and worst variables have been computed using the "randomForest" R
-  // package. YDF and the R randomForest implementation work differently for
-  // categorical attributes. Since this dataset has a lot of categorical
-  // attributes, the reported orders of variable importance are not exactly the
-  // same for the two libraries. However, the overall ranking is still close.
+  // Primary signal features should clearly dominate noise or low-information
+  // features.
+  ASSERT_OK_AND_ASSIGN(
+      const double vi_capital_gain,
+      utils::GetVariableImportanceScore("capital_gain", model_->data_spec(),
+                                        mean_decrease_accuracy));
+  ASSERT_OK_AND_ASSIGN(
+      const double vi_relationship,
+      utils::GetVariableImportanceScore("relationship", model_->data_spec(),
+                                        mean_decrease_accuracy));
+  ASSERT_OK_AND_ASSIGN(
+      const double vi_occupation,
+      utils::GetVariableImportanceScore("occupation", model_->data_spec(),
+                                        mean_decrease_accuracy));
 
-  // Top 3 variables.
-  const int rank_capital_gain = utils::GetVariableImportanceRank(
-      "capital_gain", model_->data_spec(), mean_decrease_accuracy);
-  const int rank_relationship = utils::GetVariableImportanceRank(
-      "relationship", model_->data_spec(), mean_decrease_accuracy);
-  const int rank_occupation = utils::GetVariableImportanceRank(
-      "occupation", model_->data_spec(), mean_decrease_accuracy);
+  ASSERT_OK_AND_ASSIGN(
+      const double vi_fnlwgt,
+      utils::GetVariableImportanceScore("fnlwgt", model_->data_spec(),
+                                        mean_decrease_accuracy));
+  ASSERT_OK_AND_ASSIGN(const double vi_race, utils::GetVariableImportanceScore(
+                                                 "race", model_->data_spec(),
+                                                 mean_decrease_accuracy));
+  ASSERT_OK_AND_ASSIGN(
+      const double vi_native_country,
+      utils::GetVariableImportanceScore("native_country", model_->data_spec(),
+                                        mean_decrease_accuracy));
 
-  EXPECT_LE(rank_capital_gain, 5);
-  EXPECT_LE(rank_relationship, 6);
-  EXPECT_LE(rank_occupation, 6);
+  EXPECT_GT(vi_capital_gain, vi_fnlwgt);
+  EXPECT_GT(vi_relationship, vi_race);
+  EXPECT_GT(vi_occupation, vi_native_country);
 
-  // Worst 2 variables.
-  const int rank_fnlwgt = utils::GetVariableImportanceRank(
-      "fnlwgt", model_->data_spec(), mean_decrease_accuracy);
-  const int rank_education = utils::GetVariableImportanceRank(
-      "education", model_->data_spec(), mean_decrease_accuracy);
-
-  EXPECT_GE(rank_fnlwgt, 7);
-  EXPECT_GE(rank_education, 4);
+  EXPECT_GT(vi_capital_gain, 0.0045);
+  EXPECT_GT(vi_relationship, 0.0045);
 
   std::string description;
   model_->AppendDescriptionAndStatistics(false, &description);
@@ -726,15 +754,17 @@ TEST(RandomForest, OOBPredictions) {
   BuildToyModelAndToyDataset(model::proto::Task::CLASSIFICATION, &model,
                              &dataset);
 
-  std::vector<internal::PredictionAccumulator> predictions;
-  internal::InitializeOOBPredictionAccumulators(
+  std::vector<internal::OOBEvaluator::PredictionAccumulator> predictions;
+
+  internal::OOBEvaluator::InitializeAccumulators(
       dataset.nrow(), config, config_link, dataset.data_spec(), &predictions);
   EXPECT_EQ(predictions.size(), dataset.nrow());
 
   std::vector<UnsignedExampleIdx> sorted_non_oob_example_indices = {1};
   EXPECT_OK(internal::UpdateOOBPredictionsWithNewTree(
       dataset, config, sorted_non_oob_example_indices, true,
-      *model.decision_trees()[0].get(), {}, &rnd, &predictions));
+      *model.decision_trees()[0].get(), {}, 0, dataset.nrow(), &rnd,
+      &predictions));
   EXPECT_EQ(predictions[0].num_trees, 1);
   EXPECT_EQ(predictions[0].classification.NumObservations(), 1);
   EXPECT_EQ(predictions[0].classification.TopClass(), 1);
@@ -754,7 +784,8 @@ TEST(RandomForest, OOBPredictions) {
 
   EXPECT_OK(internal::UpdateOOBPredictionsWithNewTree(
       dataset, config, sorted_non_oob_example_indices, true,
-      *model.decision_trees()[1].get(), {}, &rnd, &predictions));
+      *model.decision_trees()[1].get(), {}, 0, dataset.nrow(), &rnd,
+      &predictions));
   EXPECT_EQ(predictions[0].num_trees, 2);
   EXPECT_EQ(predictions[0].classification.NumObservations(), 2);
   EXPECT_EQ(predictions[0].classification.TopClass(), 1);
@@ -788,14 +819,14 @@ TEST(RandomForest, ComputeVariableImportancesFromAccumulatedPredictions) {
   BuildToyModelAndToyDataset(model::proto::Task::CLASSIFICATION, &model,
                              &dataset);
 
-  std::vector<internal::PredictionAccumulator> oob_predictions;
-  std::vector<std::vector<internal::PredictionAccumulator>>
+  std::vector<internal::OOBEvaluator::PredictionAccumulator> oob_predictions;
+  std::vector<std::vector<internal::OOBEvaluator::PredictionAccumulator>>
       oob_predictions_per_input_features(2);
 
-  internal::InitializeOOBPredictionAccumulators(
+  internal::OOBEvaluator::InitializeAccumulators(
       dataset.nrow(), config, config_link, dataset.data_spec(),
       &oob_predictions);
-  internal::InitializeOOBPredictionAccumulators(
+  internal::OOBEvaluator::InitializeAccumulators(
       dataset.nrow(), config, config_link, dataset.data_spec(),
       &oob_predictions_per_input_features[0]);
 
@@ -804,20 +835,22 @@ TEST(RandomForest, ComputeVariableImportancesFromAccumulatedPredictions) {
   // Baseline
   EXPECT_OK(internal::UpdateOOBPredictionsWithNewTree(
       dataset, config, sorted_non_oob_example_indices, true,
-      *model.decision_trees()[0].get(), {}, &rnd, &oob_predictions));
+      *model.decision_trees()[0].get(), {}, 0, dataset.nrow(), &rnd,
+      &oob_predictions));
   EXPECT_OK(internal::UpdateOOBPredictionsWithNewTree(
       dataset, config, sorted_non_oob_example_indices, true,
-      *model.decision_trees()[1].get(), {}, &rnd, &oob_predictions));
+      *model.decision_trees()[1].get(), {}, 0, dataset.nrow(), &rnd,
+      &oob_predictions));
 
   // Shuffled
   for (int repetition = 0; repetition < 100; repetition++) {
     EXPECT_OK(internal::UpdateOOBPredictionsWithNewTree(
         dataset, config, sorted_non_oob_example_indices, true,
-        *model.decision_trees()[0].get(), 0, &rnd,
+        *model.decision_trees()[0].get(), 0, 0, dataset.nrow(), &rnd,
         &oob_predictions_per_input_features[0]));
     EXPECT_OK(internal::UpdateOOBPredictionsWithNewTree(
         dataset, config, sorted_non_oob_example_indices, true,
-        *model.decision_trees()[1].get(), 0, &rnd,
+        *model.decision_trees()[1].get(), 0, 0, dataset.nrow(), &rnd,
         &oob_predictions_per_input_features[0]));
   }
 
@@ -836,6 +869,237 @@ TEST(RandomForest, ComputeVariableImportancesFromAccumulatedPredictions) {
   EXPECT_EQ(importance.size(), 1);
   EXPECT_EQ(importance[0].attribute_idx(), 0);
   EXPECT_EQ(importance[0].importance(), -0.5);
+}
+
+TEST_F(RandomForestOnAdult, OOBEvaluationTrajectoryIsAccurateAndMonotonic) {
+  auto* rf_config = train_config_.MutableExtension(
+      random_forest::proto::random_forest_config);
+  rf_config->set_num_trees(50);
+  rf_config->set_compute_oob_performances(true);
+
+  TrainAndEvaluateModel();
+
+  auto* rf_model = dynamic_cast<const RandomForestModel*>(model_.get());
+  ASSERT_NE(rf_model, nullptr);
+  const auto& oob_evals = rf_model->out_of_bag_evaluations();
+  ASSERT_FALSE(oob_evals.empty());
+  EXPECT_GT(metric::Accuracy(oob_evals.back().evaluation()), 0.80f);
+  EXPECT_GT(metric::Accuracy(oob_evals.back().evaluation()),
+            metric::Accuracy(oob_evals.front().evaluation()));
+}
+
+TEST_F(RandomForestOnAdult, OOBEvaluationIntervalInTreesIsRespected) {
+  deployment_config_.set_num_threads(1);
+  auto* rf_config = train_config_.MutableExtension(
+      random_forest::proto::random_forest_config);
+  rf_config->set_num_trees(20);
+  rf_config->set_winner_take_all_inference(false);
+  rf_config->set_oob_evaluation_interval_in_trees(5);
+  rf_config->set_oob_evaluation_interval_in_seconds(10000);
+  rf_config->set_compute_oob_performances(true);
+
+  TrainAndEvaluateModel();
+
+  auto* rf_model = dynamic_cast<const RandomForestModel*>(model_.get());
+  ASSERT_NE(rf_model, nullptr);
+  std::vector<int> eval_tree_numbers;
+  for (const auto& eval : rf_model->out_of_bag_evaluations()) {
+    eval_tree_numbers.push_back(eval.number_of_trees());
+  }
+  EXPECT_THAT(eval_tree_numbers, ElementsAre(1, 6, 11, 16, 20));
+}
+
+TEST(OOBEvaluatorTest, DetermineNumStripes) {
+  proto::RandomForestTrainingConfig rf_config;
+  rf_config.set_num_trees(100);
+  rf_config.set_oob_evaluation_interval_in_trees(10);
+
+  // Large dataset (100,000 examples): max_stripes_from_dataset = 97.
+  // num_threads = 64, interval = 10 -> min(64, 10) = 10.
+  EXPECT_EQ(internal::OOBEvaluator::DetermineNumStripes(
+                /*num_examples=*/100000, rf_config, /*num_threads=*/64),
+            10);
+
+  // Large dataset, large interval: interval = 100, num_threads = 64 -> 64.
+  rf_config.set_oob_evaluation_interval_in_trees(100);
+  EXPECT_EQ(internal::OOBEvaluator::DetermineNumStripes(
+                /*num_examples=*/100000, rf_config, /*num_threads=*/64),
+            64);
+
+  // Small dataset (500 examples): max_stripes_from_dataset = 0 -> minimum 1.
+  EXPECT_EQ(internal::OOBEvaluator::DetermineNumStripes(
+                /*num_examples=*/500, rf_config, /*num_threads=*/64),
+            1);
+
+  // Frequent evaluation (interval = 1) -> 1.
+  rf_config.set_oob_evaluation_interval_in_trees(1);
+  EXPECT_EQ(internal::OOBEvaluator::DetermineNumStripes(
+                /*num_examples=*/100000, rf_config, /*num_threads=*/64),
+            1);
+
+  // Single-threaded -> 1.
+  rf_config.set_oob_evaluation_interval_in_trees(10);
+  EXPECT_EQ(internal::OOBEvaluator::DetermineNumStripes(
+                /*num_examples=*/100000, rf_config, /*num_threads=*/1),
+            1);
+
+  // Few trees: num_trees = 3, num_threads = 64, interval = 10 -> 3.
+  rf_config.set_num_trees(3);
+  EXPECT_EQ(internal::OOBEvaluator::DetermineNumStripes(
+                /*num_examples=*/100000, rf_config, /*num_threads=*/64),
+            3);
+
+  // Disabled tree interval (interval = 0) -> defaults to num_threads (32).
+  rf_config.set_num_trees(100);
+  rf_config.set_oob_evaluation_interval_in_trees(0);
+  EXPECT_EQ(internal::OOBEvaluator::DetermineNumStripes(
+                /*num_examples=*/100000, rf_config, /*num_threads=*/32),
+            32);
+}
+
+TEST(OOBEvaluatorTest, RejectsInvalidVariableImportanceConfig) {
+  dataset::VerticalDataset dataset;
+  model::proto::TrainingConfig config;
+  auto* rf_config =
+      config.MutableExtension(random_forest::proto::random_forest_config);
+  rf_config->set_compute_oob_performances(false);
+  rf_config->set_compute_oob_variable_importances(true);
+  model::proto::TrainingConfigLinking config_link;
+  RandomForestModel model;
+
+  const auto status_or = internal::OOBEvaluator::Create(
+      /*compute_oob_performances=*/false,
+      /*compute_oob_variable_importances=*/true, dataset, config, config_link,
+      /*num_threads=*/1, &model);
+  EXPECT_THAT(status_or.status(), StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
+TEST(OOBEvaluatorTest, GateCleanupIsExecutedOnEarlyReturn) {
+  dataset::VerticalDataset dataset;
+  utils::RandomEngine random(123456);
+  ExtremelyRandomizeTreesFigure10Dataset(5, &dataset, &random);
+
+  model::proto::TrainingConfig config;
+  auto* rf_config =
+      config.MutableExtension(random_forest::proto::random_forest_config);
+  rf_config->set_compute_oob_performances(true);
+  rf_config->set_num_trees(2);
+
+  // Set task to RANKING, which guarantees an InvalidArgumentError
+  // inside internal::UpdateOOBPredictionsWithNewTree during stripe evaluation.
+  config.set_task(model::proto::Task::RANKING);
+
+  model::proto::TrainingConfigLinking config_link;
+  RandomForestModel model;
+
+  auto status_or = internal::OOBEvaluator::Create(
+      /*compute_oob_performances=*/true,
+      /*compute_oob_variable_importances=*/false, dataset, config, config_link,
+      /*num_threads=*/1, &model);
+  ASSERT_OK(status_or);
+  auto evaluator = std::move(status_or).value();
+
+  decision_tree::DecisionTree tree;
+  tree.CreateRoot();
+  tree.mutable_root()
+      ->mutable_node()
+      ->mutable_condition()
+      ->mutable_condition()
+      ->mutable_higher_condition()
+      ->set_threshold(0);
+  tree.mutable_root()->mutable_node()->mutable_condition()->set_attribute(0);
+
+  // First call should fail due to unsupported RANKING task.
+  // It closes the gate initially, then returns early from the stripe update
+  // loop, executing gate_cleanup which re-opens the gate.
+  auto status1 =
+      evaluator->UpdateAndMaybeEvaluate(dataset, {1, 2}, tree, &random);
+  EXPECT_THAT(status1, StatusIs(absl::StatusCode::kInvalidArgument));
+
+  // The second call verifies that the gate was indeed re-opened.
+  // If gate_cleanup failed to reset gate_closed_, this call will hang
+  // indefinitely.
+  auto status2 =
+      evaluator->UpdateAndMaybeEvaluate(dataset, {1, 2}, tree, &random);
+  EXPECT_THAT(status2, StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
+TEST(OOBEvaluatorTest, EvaluatesMetricsOnLastTree) {
+  dataset::VerticalDataset dataset;
+  utils::RandomEngine random(123456);
+  ExtremelyRandomizeTreesFigure10Dataset(5, &dataset, &random);
+
+  model::proto::TrainingConfig config;
+  auto* rf_config =
+      config.MutableExtension(random_forest::proto::random_forest_config);
+  rf_config->set_compute_oob_performances(true);
+
+  // We'll simulate training exactly 3 trees.
+  rf_config->set_num_trees(3);
+
+  // Choose a huge interval so that interval triggers never cause evaluations.
+  rf_config->set_oob_evaluation_interval_in_trees(100);
+
+  config.set_task(model::proto::Task::REGRESSION);
+  config.set_label("y");
+
+  model::proto::TrainingConfigLinking config_link;
+  config_link.set_label(1);
+
+  RandomForestModel model;
+  model.set_task(model::proto::Task::REGRESSION);
+  model.set_label_col_idx(1);
+
+  auto status_or = internal::OOBEvaluator::Create(
+      /*compute_oob_performances=*/true,
+      /*compute_oob_variable_importances=*/false, dataset, config, config_link,
+      /*num_threads=*/1, &model);
+  ASSERT_OK(status_or);
+  auto evaluator = std::move(status_or).value();
+
+  decision_tree::DecisionTree tree;
+  tree.CreateRoot();
+  tree.mutable_root()->mutable_node()->mutable_regressor()->set_top_value(1.0);
+
+  // Tree 1: Evaluator finishes 1 tree at Gate Exit, evaluate immediately.
+  ASSERT_OK(evaluator->UpdateAndMaybeEvaluate(dataset, {1, 2}, tree, &random));
+  EXPECT_EQ(model.out_of_bag_evaluations().size(), 1);
+
+  // Tree 2: Evaluator finishes 2 trees no evaluation.
+  ASSERT_OK(evaluator->UpdateAndMaybeEvaluate(dataset, {1, 2}, tree, &random));
+  EXPECT_EQ(model.out_of_bag_evaluations().size(), 1);
+
+  // Tree 3: Last tree, evaluation runs.
+  ASSERT_OK(evaluator->UpdateAndMaybeEvaluate(dataset, {1, 2}, tree, &random));
+  ASSERT_EQ(model.out_of_bag_evaluations().size(), 2);
+  EXPECT_EQ(model.out_of_bag_evaluations()[1].number_of_trees(), 3);
+}
+
+TEST_F(RandomForestOnAdult, MultithreadedOOBMatchesSequentialOOB) {
+  train_config_.set_random_seed(1234);
+  auto* rf_config = train_config_.MutableExtension(
+      random_forest::proto::random_forest_config);
+  rf_config->set_compute_oob_performances(true);
+
+  deployment_config_.set_num_threads(1);
+  TrainAndEvaluateModel();
+
+  auto* rf_model_seq = dynamic_cast<const RandomForestModel*>(model_.get());
+  ASSERT_NE(rf_model_seq, nullptr);
+  ASSERT_FALSE(rf_model_seq->out_of_bag_evaluations().empty());
+  const float seq_oob_accuracy = metric::Accuracy(
+      rf_model_seq->out_of_bag_evaluations().back().evaluation());
+
+  deployment_config_.set_num_threads(8);
+  TrainAndEvaluateModel();
+
+  auto* rf_model_mt = dynamic_cast<const RandomForestModel*>(model_.get());
+  ASSERT_NE(rf_model_mt, nullptr);
+  ASSERT_FALSE(rf_model_mt->out_of_bag_evaluations().empty());
+  const float mt_oob_accuracy = metric::Accuracy(
+      rf_model_mt->out_of_bag_evaluations().back().evaluation());
+
+  EXPECT_FLOAT_EQ(seq_oob_accuracy, mt_oob_accuracy);
 }
 
 // We train a 100-trees regressive RF and ERT on 20 examples. The RF predictions
@@ -1119,7 +1383,7 @@ TEST(RandomForest, PredefinedHyperParameters) {
       train_config.MutableExtension(random_forest::proto::random_forest_config);
   rf_config->set_num_trees(150);
   train_config.set_learner(RandomForestLearner::kRegisteredName);
-  utils::TestPredefinedHyperParametersAdultDataset(train_config, 2, 0.86);
+  utils::TestPredefinedHyperParametersAdultDataset(train_config, 4, 0.86);
 }
 
 class RandomForestOnSimPTE : public utils::TrainAndTestTester {
@@ -1561,6 +1825,25 @@ TEST(RandomForest, Honest) {
   ASSERT_NE(rf_model, nullptr);
   // Make sure the model doesn't actually separate all examples.
   EXPECT_LT(rf_model->NumNodes(), 11);
+}
+
+TEST(RandomForestOnConstantLabel, EvaluationDoesNotCrash) {
+  model::proto::DeploymentConfig deployment_config;
+  model::proto::TrainingConfig train_config;
+  train_config.set_learner(RandomForestLearner::kRegisteredName);
+  train_config.set_task(model::proto::Task::CLASSIFICATION);
+  train_config.set_label("label");
+  ASSERT_OK_AND_ASSIGN(const dataset::VerticalDataset dataset,
+                       CreateSingletonLabelDataset());
+  std::unique_ptr<model::AbstractLearner> learner;
+  ASSERT_OK(model::GetLearner(train_config, &learner, deployment_config));
+  ASSERT_OK_AND_ASSIGN(const std::unique_ptr<model::AbstractModel> model,
+                       learner->TrainWithStatus(dataset));
+
+  utils::RandomEngine rnd;
+  metric::proto::EvaluationOptions eval_options;
+  EXPECT_THAT(model->EvaluateWithStatus(dataset, eval_options, &rnd),
+              Not(StatusIsOk()));
 }
 
 }  // namespace

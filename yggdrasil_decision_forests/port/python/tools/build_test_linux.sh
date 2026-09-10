@@ -33,22 +33,19 @@ build_and_maybe_test () {
    echo "   Compiler : $CC"
 
     bazel version
-    local ARCHITECTURE=$(uname -m)
 
     local flags="--config=linux_cpp17 --features=-fully_static_link"
-    if [ "$ARCHITECTURE" == "x86_64" ]; then
-        flags="$flags --config=linux_avx2"
-    fi
-    local pydf_targets="//ydf/...:all"
-    # Install PYDF components
-    python -m pip install -r dev_requirements.txt
     python -m pip install -r requirements.txt
 
-    time bazel build ${flags} -- ${pydf_targets}
-    if [[ "$RUN_TESTS" = 1 ]]; then
-      time bazel test ${flags} --test_output=errors -- ${pydf_targets}
+    if [[ "$RUN_TESTS" = 0 ]]; then
+      # OSS builds don't check with Pytype, but we need to compile all targets
+      # to ensure protos are compiled for Python.
+      bazel build ${flags} -- //ydf/...:all
+    else
+      python -m pip install -r dev_requirements.txt
+      time bazel build ${flags} -- //ydf/...:all
+      time bazel test ${flags} --test_output=errors -- //ydf/...:all
     fi
-    echo "PYDF build / test complete."
 } 
 
 main () {

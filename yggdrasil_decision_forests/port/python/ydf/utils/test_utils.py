@@ -63,20 +63,18 @@ class TrainAndTestDataset:
   train: dataset.VerticalDataset
   test: dataset.VerticalDataset
 
-
 def ydf_test_data_path() -> str:
   return os.path.join(
       data_root_path(),
-      "external/ydf_cc/yggdrasil_decision_forests/test_data",
+      "external/yggdrasil_decision_forests~/yggdrasil_decision_forests/test_data",
   )
 
 
 def ydf_test_data_pathlib() -> pathlib.Path:
   return (
       pathlib.Path(data_root_path())
-      / "external/ydf_cc/yggdrasil_decision_forests/test_data"
+      / "external/yggdrasil_decision_forests~/yggdrasil_decision_forests/test_data"
   )
-
 
 def load_datasets(
     name: str, column_args: Optional[Sequence[dataspec.Column]] = None
@@ -89,7 +87,7 @@ def load_datasets(
   train_pd = pd.read_csv(train_path)
   test_pd = pd.read_csv(test_path)
   train_vds = dataset.create_vertical_dataset(
-      train_pd, columns=column_args, include_all_columns=True
+      train_pd, columns=column_args, include_all_columns=True  # pyrefly: ignore[bad-argument-type]
   )
   test_vds = dataset.create_vertical_dataset(
       test_pd, data_spec=train_vds.data_spec()
@@ -151,6 +149,39 @@ def golden_check_string(
         value_path,
     )
     with open(value_path, "w") as f:
+      f.write(value)
+
+  test.assertEqual(value, golden_data)
+
+
+def golden_check_bytes(
+    test, value: bytes, golden_path: str, postfix: str = ""
+) -> None:
+  """Ensures that "value" is equal to the content of the file "golden_path".
+
+  Args:
+    test: A test.
+    value: Value to test.
+    golden_path: Path to golden file expressed from the root of the repo.
+    postfix: Optional postfix to the path of the file containing the actual
+      value.
+  """
+
+  with open(os.path.join(data_root_path(), golden_path), "rb") as f:
+    golden_data = f.read()
+
+  if value != golden_data:
+    value_path = os.path.join(
+        absltest.TEST_TMPDIR.value, os.path.basename(golden_path) + postfix
+    )
+    logging.info("os.path.dirname(value_path): %s", os.path.dirname(value_path))
+    os.makedirs(os.path.dirname(value_path), exist_ok=True)
+    logging.info(
+        "Golden test failed for %s. Save the effective value to %s",
+        golden_path,
+        value_path,
+    )
+    with open(value_path, "wb") as f:
       f.write(value)
 
   test.assertEqual(value, golden_data)

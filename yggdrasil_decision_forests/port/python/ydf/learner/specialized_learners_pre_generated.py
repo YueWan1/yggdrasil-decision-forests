@@ -36,10 +36,11 @@ from typing import Dict, List, Optional, Sequence, Set, Union
 
 from yggdrasil_decision_forests.dataset import data_spec_pb2
 from yggdrasil_decision_forests.learner import abstract_learner_pb2
-from ydf.cc import ydf
 from ydf.dataset import dataset
 from ydf.dataset import dataspec
 from ydf.learner import abstract_feature_selector as abstract_feature_selector_lib
+from ydf.learner import custom_loss
+from ydf.learner import custom_metric
 from ydf.learner import generic_learner
 from ydf.learner import hyperparameters
 from ydf.learner import tuner as tuner_lib
@@ -142,6 +143,11 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
       reading, but skew statistics in the dataspec, which can hurt model quality
       (e.g. if an important category of a categorical feature is considered
       OOV). Set to -1 to scan the entire dataset.
+    label_classes: An ordered list of possible values for the label. This
+      argument is optional and typically not required. If not provided, the
+      label classes are determined automatically from the dataset. If provided,
+      it forces a specific order for the label classes. All label values present
+      in the dataset must be included in this list.
     data_spec: Dataspec to be used (advanced). If a data spec is given,
       `columns`, `include_all_columns`, `max_vocab_count`,
       `min_vocab_frequency`, `discretize_numerical_columns` and
@@ -177,14 +183,24 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
       One-hot encoding. Find the optimal categorical split of the form
       "attribute == param". This method is similar (but more efficient) than
       converting each possible categorical value into a boolean feature. This
-      method is available for comparison purpose and generally performs worse
-      than other alternatives. - `RANDOM`: Best splits among a set of random
-      candidate. Find the a categorical split of the form "value \\in mask"
-      using a random search. This solution can be seen as an approximation of
-      the CART algorithm. This method is a strong alternative to CART. This
-      algorithm is inspired from section "5.1 Categorical Variables" of "Random
-      Forest", 2001.
+      method is available for comparison purposes for classification problems
+      and generally performs worse than other alternatives. - `RANDOM`: Best
+      splits among a set of random candidates. Find the a categorical split of
+      the form "value \\in mask" using a random search. This solution can be
+      seen as an approximation of the CART algorithm. This method is a strong
+      alternative to CART. This algorithm is inspired from section "5.1
+      Categorical Variables" of "Random Forest", 2001.
         Default: "CART".
+    categorical_random_max_num_trials: For random categorical splits i.e.
+      `categorical_algorithm=RANDOM`. Maximum number of candidate splits
+      evaluated at each node. Defaults to 5000. Default: None.
+    categorical_random_num_trial_exponent: For random categorical splits i.e.
+      `categorical_algorithm=RANDOM`. Controls the number of random splits to
+      evaluate. The effective number of splits is
+      `min(categorical_random_max_num_trials, 32 + {vocab
+      size}^categorical_random_num_trial_exponent)`, with `vocab size` being the
+      number of unique categorical values in the node. Defaults to 2
+      Default: None.
     categorical_set_split_greedy_maximum_mask_size: For categorical set splits
       e.g. texts. Maximum number of attribute values on the positive side of the
       split mask. Smaller values might improve training speed but lead to worse
@@ -483,6 +499,7 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
       num_discretized_numerical_bins: int = 255,
       max_num_scanned_rows_to_infer_semantic: int = 100_000,
       max_num_scanned_rows_to_compute_statistics: int = 100_000,
+      label_classes: Optional[list[str]] = None,
       data_spec: Optional[data_spec_pb2.DataSpecification] = None,
       extra_training_config: Optional[
           abstract_learner_pb2.TrainingConfig
@@ -492,6 +509,8 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
       bootstrap_size_ratio: float = 1.0,
       bootstrap_training_dataset: bool = True,
       categorical_algorithm: str = "CART",
+      categorical_random_max_num_trials: Optional[int] = None,
+      categorical_random_num_trial_exponent: Optional[float] = None,
       categorical_set_split_greedy_maximum_mask_size: int = -1,
       categorical_set_split_greedy_sampling: float = 0.1,
       categorical_set_split_max_num_items: int = -1,
@@ -555,6 +574,10 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
         "bootstrap_size_ratio": bootstrap_size_ratio,
         "bootstrap_training_dataset": bootstrap_training_dataset,
         "categorical_algorithm": categorical_algorithm,
+        "categorical_random_max_num_trials": categorical_random_max_num_trials,
+        "categorical_random_num_trial_exponent": (
+            categorical_random_num_trial_exponent
+        ),
         "categorical_set_split_greedy_maximum_mask_size": (
             categorical_set_split_greedy_maximum_mask_size
         ),
@@ -648,6 +671,7 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
         num_discretized_numerical_bins=num_discretized_numerical_bins,
         max_num_scanned_rows_to_infer_semantic=max_num_scanned_rows_to_infer_semantic,
         max_num_scanned_rows_to_compute_statistics=max_num_scanned_rows_to_compute_statistics,
+        label_classes=label_classes,
     )
 
     deployment_config = self._build_deployment_config(
@@ -661,6 +685,7 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
         label=label,
         weights=weights,
         class_weights=class_weights,
+        custom_metrics=None,
         ranking_group=ranking_group,
         uplift_treatment=uplift_treatment,
         data_spec_args=data_spec_args,
@@ -730,6 +755,7 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
         require_label=True,
         support_custom_loss=False,
         support_return_in_bag_example_indices=True,
+        support_custom_metrics=False,
     )
 
   @classmethod
@@ -765,6 +791,15 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
             ),
             parameters={"winner_take_all": True},
         ),
+        "better_defaultv2": hyperparameters.HyperparameterTemplate(
+            name="better_default",
+            version=2,
+            description=(
+                "A configuration that is generally better than the default"
+                " parameters without being more expensive."
+            ),
+            parameters={"winner_take_all": False},
+        ),
         "benchmark_rank1v1": hyperparameters.HyperparameterTemplate(
             name="benchmark_rank1",
             version=1,
@@ -774,6 +809,21 @@ class RandomForestLearner(generic_learner.GenericCCLearner):
             ),
             parameters={
                 "winner_take_all": True,
+                "categorical_algorithm": "RANDOM",
+                "split_axis": "SPARSE_OBLIQUE",
+                "sparse_oblique_normalization": "MIN_MAX",
+                "sparse_oblique_num_projections_exponent": 1.0,
+            },
+        ),
+        "benchmark_rank1v2": hyperparameters.HyperparameterTemplate(
+            name="benchmark_rank1",
+            version=2,
+            description=(
+                "Top ranking hyper-parameters on our benchmark slightly"
+                " modified to run in reasonable time."
+            ),
+            parameters={
+                "winner_take_all": False,
                 "categorical_algorithm": "RANDOM",
                 "split_axis": "SPARSE_OBLIQUE",
                 "sparse_oblique_normalization": "MIN_MAX",
@@ -929,6 +979,11 @@ class IsolationForestLearner(generic_learner.GenericCCLearner):
       reading, but skew statistics in the dataspec, which can hurt model quality
       (e.g. if an important category of a categorical feature is considered
       OOV). Set to -1 to scan the entire dataset.
+    label_classes: An ordered list of possible values for the label. This
+      argument is optional and typically not required. If not provided, the
+      label classes are determined automatically from the dataset. If provided,
+      it forces a specific order for the label classes. All label values present
+      in the dataset must be included in this list.
     data_spec: Dataspec to be used (advanced). If a data spec is given,
       `columns`, `include_all_columns`, `max_vocab_count`,
       `min_vocab_frequency`, `discretize_numerical_columns` and
@@ -1060,6 +1115,7 @@ class IsolationForestLearner(generic_learner.GenericCCLearner):
       num_discretized_numerical_bins: int = 255,
       max_num_scanned_rows_to_infer_semantic: int = 100_000,
       max_num_scanned_rows_to_compute_statistics: int = 100_000,
+      label_classes: Optional[list[str]] = None,
       data_spec: Optional[data_spec_pb2.DataSpecification] = None,
       extra_training_config: Optional[
           abstract_learner_pb2.TrainingConfig
@@ -1129,6 +1185,7 @@ class IsolationForestLearner(generic_learner.GenericCCLearner):
         num_discretized_numerical_bins=num_discretized_numerical_bins,
         max_num_scanned_rows_to_infer_semantic=max_num_scanned_rows_to_infer_semantic,
         max_num_scanned_rows_to_compute_statistics=max_num_scanned_rows_to_compute_statistics,
+        label_classes=label_classes,
     )
 
     deployment_config = self._build_deployment_config(
@@ -1142,6 +1199,7 @@ class IsolationForestLearner(generic_learner.GenericCCLearner):
         label=label,
         weights=weights,
         class_weights=class_weights,
+        custom_metrics=None,
         ranking_group=ranking_group,
         uplift_treatment=uplift_treatment,
         data_spec_args=data_spec_args,
@@ -1211,6 +1269,7 @@ class IsolationForestLearner(generic_learner.GenericCCLearner):
         require_label=False,
         support_custom_loss=False,
         support_return_in_bag_example_indices=False,
+        support_custom_metrics=False,
     )
 
   @classmethod
@@ -1317,6 +1376,11 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       reading, but skew statistics in the dataspec, which can hurt model quality
       (e.g. if an important category of a categorical feature is considered
       OOV). Set to -1 to scan the entire dataset.
+    label_classes: An ordered list of possible values for the label. This
+      argument is optional and typically not required. If not provided, the
+      label classes are determined automatically from the dataset. If provided,
+      it forces a specific order for the label classes. All label values present
+      in the dataset must be included in this list.
     data_spec: Dataspec to be used (advanced). If a data spec is given,
       `columns`, `include_all_columns`, `max_vocab_count`,
       `min_vocab_frequency`, `discretize_numerical_columns` and
@@ -1347,14 +1411,24 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       One-hot encoding. Find the optimal categorical split of the form
       "attribute == param". This method is similar (but more efficient) than
       converting each possible categorical value into a boolean feature. This
-      method is available for comparison purpose and generally performs worse
-      than other alternatives. - `RANDOM`: Best splits among a set of random
-      candidate. Find the a categorical split of the form "value \\in mask"
-      using a random search. This solution can be seen as an approximation of
-      the CART algorithm. This method is a strong alternative to CART. This
-      algorithm is inspired from section "5.1 Categorical Variables" of "Random
-      Forest", 2001.
+      method is available for comparison purposes for classification problems
+      and generally performs worse than other alternatives. - `RANDOM`: Best
+      splits among a set of random candidates. Find the a categorical split of
+      the form "value \\in mask" using a random search. This solution can be
+      seen as an approximation of the CART algorithm. This method is a strong
+      alternative to CART. This algorithm is inspired from section "5.1
+      Categorical Variables" of "Random Forest", 2001.
         Default: "CART".
+    categorical_random_max_num_trials: For random categorical splits i.e.
+      `categorical_algorithm=RANDOM`. Maximum number of candidate splits
+      evaluated at each node. Defaults to 5000. Default: None.
+    categorical_random_num_trial_exponent: For random categorical splits i.e.
+      `categorical_algorithm=RANDOM`. Controls the number of random splits to
+      evaluate. The effective number of splits is
+      `min(categorical_random_max_num_trials, 32 + {vocab
+      size}^categorical_random_num_trial_exponent)`, with `vocab size` being the
+      number of unique categorical values in the node. Defaults to 2
+      Default: None.
     categorical_set_split_greedy_maximum_mask_size: For categorical set splits
       e.g. texts. Maximum number of attribute values on the positive side of the
       split mask. Smaller values might improve training speed but lead to worse
@@ -1511,6 +1585,9 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       "num_candidate_attributes_ratio" parameters. If false, all the attributes
       are tested. Default: None.
     min_examples: Minimum number of examples in a node. Default: 5.
+    min_sum_hessian_in_leaf: Minimum value of the sum of the hessians in the
+      leafs. Splits that would violate this constraint are ignored. Only used
+      when "use_hessian_gain" is true. Default: None.
     missing_value_policy: Method used to handle missing attribute values. -
       `GLOBAL_IMPUTATION`: Missing attribute values are imputed, with the mean
       (in case of numerical attribute) or the most-frequent-item (in case of
@@ -1524,6 +1601,14 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       et al. in "Random Survival Forests"
       (https://projecteuclid.org/download/pdfview_1/euclid.aoas/1223908043).
         Default: "GLOBAL_IMPUTATION".
+    multinomial_initial_class_priors: Only for multinomial classification loss.
+      If false (default), the initial prediction (bias) of the model is 0 for
+      all classes. If true, the initial prediction is set to the logarithm of
+      class priors i.e. log(P(y=i)). Initializing with class priors is
+      equivalent to starting boosting from a constant model that predicts the
+      marginal distribution of the label. This can result in faster convergence
+      on some datasets, but it may also trigger early stopping prematurely in
+      other cases. Default: None.
     ndcg_truncation: Truncation of the NDCG loss (default 5). Only used with
       NDCG loss i.e. `loss="LAMBDA_MART_NDCG". ` Default: None.
     num_candidate_attributes: Number of unique valid attributes tested for each
@@ -1730,6 +1815,7 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
     resume_training_snapshot_interval_seconds: Indicative number of seconds in
       between snapshots when `resume_training=True`. Might be ignored by some
       learners.
+    custom_metrics: A list of custom metrics to compute during training.
     working_dir: Path to a directory available for the learning algorithm to
       store intermediate computation results. Depending on the learning
       algorithm and parameters, the working_dir might be optional, required, or
@@ -1771,6 +1857,7 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       num_discretized_numerical_bins: int = 255,
       max_num_scanned_rows_to_infer_semantic: int = 100_000,
       max_num_scanned_rows_to_compute_statistics: int = 100_000,
+      label_classes: Optional[list[str]] = None,
       data_spec: Optional[data_spec_pb2.DataSpecification] = None,
       extra_training_config: Optional[
           abstract_learner_pb2.TrainingConfig
@@ -1779,6 +1866,8 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       allow_na_conditions: bool = False,
       apply_link_function: bool = True,
       categorical_algorithm: str = "CART",
+      categorical_random_max_num_trials: Optional[int] = None,
+      categorical_random_num_trial_exponent: Optional[float] = None,
       categorical_set_split_greedy_maximum_mask_size: int = -1,
       categorical_set_split_greedy_sampling: float = 0.1,
       categorical_set_split_max_num_items: int = -1,
@@ -1804,7 +1893,7 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       l2_categorical_regularization: float = 1.0,
       l2_regularization: float = 0.0,
       lambda_loss: float = 1.0,
-      loss: str = "DEFAULT",
+      loss: Union[str, custom_loss.AbstractCustomLoss] = "DEFAULT",
       max_depth: int = 6,
       max_num_nodes: Optional[int] = None,
       maximum_model_size_in_memory_in_bytes: float = -1.0,
@@ -1812,7 +1901,9 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       mhld_oblique_max_num_attributes: Optional[int] = None,
       mhld_oblique_sample_attributes: Optional[bool] = None,
       min_examples: int = 5,
+      min_sum_hessian_in_leaf: Optional[float] = None,
       missing_value_policy: str = "GLOBAL_IMPUTATION",
+      multinomial_initial_class_priors: Optional[bool] = None,
       ndcg_truncation: Optional[int] = None,
       num_candidate_attributes: Optional[int] = -1,
       num_candidate_attributes_ratio: Optional[float] = None,
@@ -1848,6 +1939,7 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       workers: Optional[Sequence[str]] = None,
       resume_training: bool = False,
       resume_training_snapshot_interval_seconds: int = 1800,
+      custom_metrics: Optional[List[custom_metric.AbstractCustomMetric]] = None,
       working_dir: Optional[str] = None,
       num_threads: Optional[int] = None,
       tuner: Optional[tuner_lib.AbstractTuner] = None,
@@ -1864,6 +1956,10 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         "allow_na_conditions": allow_na_conditions,
         "apply_link_function": apply_link_function,
         "categorical_algorithm": categorical_algorithm,
+        "categorical_random_max_num_trials": categorical_random_max_num_trials,
+        "categorical_random_num_trial_exponent": (
+            categorical_random_num_trial_exponent
+        ),
         "categorical_set_split_greedy_maximum_mask_size": (
             categorical_set_split_greedy_maximum_mask_size
         ),
@@ -1911,7 +2007,9 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         "mhld_oblique_max_num_attributes": mhld_oblique_max_num_attributes,
         "mhld_oblique_sample_attributes": mhld_oblique_sample_attributes,
         "min_examples": min_examples,
+        "min_sum_hessian_in_leaf": min_sum_hessian_in_leaf,
         "missing_value_policy": missing_value_policy,
+        "multinomial_initial_class_priors": multinomial_initial_class_priors,
         "ndcg_truncation": ndcg_truncation,
         "num_candidate_attributes": num_candidate_attributes,
         "num_candidate_attributes_ratio": num_candidate_attributes_ratio,
@@ -1979,6 +2077,7 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         num_discretized_numerical_bins=num_discretized_numerical_bins,
         max_num_scanned_rows_to_infer_semantic=max_num_scanned_rows_to_infer_semantic,
         max_num_scanned_rows_to_compute_statistics=max_num_scanned_rows_to_compute_statistics,
+        label_classes=label_classes,
     )
 
     deployment_config = self._build_deployment_config(
@@ -1995,6 +2094,7 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         label=label,
         weights=weights,
         class_weights=class_weights,
+        custom_metrics=custom_metrics,
         ranking_group=ranking_group,
         uplift_treatment=uplift_treatment,
         data_spec_args=data_spec_args,
@@ -2064,6 +2164,7 @@ class GradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         require_label=True,
         support_custom_loss=True,
         support_return_in_bag_example_indices=False,
+        support_custom_metrics=True,
     )
 
   @classmethod
@@ -2199,6 +2300,11 @@ class DistributedGradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       reading, but skew statistics in the dataspec, which can hurt model quality
       (e.g. if an important category of a categorical feature is considered
       OOV). Set to -1 to scan the entire dataset.
+    label_classes: An ordered list of possible values for the label. This
+      argument is optional and typically not required. If not provided, the
+      label classes are determined automatically from the dataset. If provided,
+      it forces a specific order for the label classes. All label values present
+      in the dataset must be included in this list.
     data_spec: Dataspec to be used (advanced). If a data spec is given,
       `columns`, `include_all_columns`, `max_vocab_count`,
       `min_vocab_frequency`, `discretize_numerical_columns` and
@@ -2352,6 +2458,7 @@ class DistributedGradientBoostedTreesLearner(generic_learner.GenericCCLearner):
       num_discretized_numerical_bins: int = 255,
       max_num_scanned_rows_to_infer_semantic: int = 100_000,
       max_num_scanned_rows_to_compute_statistics: int = 100_000,
+      label_classes: Optional[list[str]] = None,
       data_spec: Optional[data_spec_pb2.DataSpecification] = None,
       extra_training_config: Optional[
           abstract_learner_pb2.TrainingConfig
@@ -2422,6 +2529,7 @@ class DistributedGradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         num_discretized_numerical_bins=num_discretized_numerical_bins,
         max_num_scanned_rows_to_infer_semantic=max_num_scanned_rows_to_infer_semantic,
         max_num_scanned_rows_to_compute_statistics=max_num_scanned_rows_to_compute_statistics,
+        label_classes=label_classes,
     )
 
     deployment_config = self._build_deployment_config(
@@ -2438,6 +2546,7 @@ class DistributedGradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         label=label,
         weights=weights,
         class_weights=class_weights,
+        custom_metrics=None,
         ranking_group=ranking_group,
         uplift_treatment=uplift_treatment,
         data_spec_args=data_spec_args,
@@ -2498,7 +2607,7 @@ class DistributedGradientBoostedTreesLearner(generic_learner.GenericCCLearner):
   @classmethod
   def _capabilities(cls) -> abstract_learner_pb2.LearnerCapabilities:
     return abstract_learner_pb2.LearnerCapabilities(
-        support_max_training_duration=False,
+        support_max_training_duration=True,
         resume_training=True,
         support_validation_dataset=True,
         support_partial_cache_dataset_format=True,
@@ -2507,6 +2616,7 @@ class DistributedGradientBoostedTreesLearner(generic_learner.GenericCCLearner):
         require_label=True,
         support_custom_loss=False,
         support_return_in_bag_example_indices=False,
+        support_custom_metrics=False,
     )
 
   @classmethod
@@ -2611,6 +2721,11 @@ class CartLearner(generic_learner.GenericCCLearner):
       reading, but skew statistics in the dataspec, which can hurt model quality
       (e.g. if an important category of a categorical feature is considered
       OOV). Set to -1 to scan the entire dataset.
+    label_classes: An ordered list of possible values for the label. This
+      argument is optional and typically not required. If not provided, the
+      label classes are determined automatically from the dataset. If provided,
+      it forces a specific order for the label classes. All label values present
+      in the dataset must be included in this list.
     data_spec: Dataspec to be used (advanced). If a data spec is given,
       `columns`, `include_all_columns`, `max_vocab_count`,
       `min_vocab_frequency`, `discretize_numerical_columns` and
@@ -2631,14 +2746,24 @@ class CartLearner(generic_learner.GenericCCLearner):
       One-hot encoding. Find the optimal categorical split of the form
       "attribute == param". This method is similar (but more efficient) than
       converting each possible categorical value into a boolean feature. This
-      method is available for comparison purpose and generally performs worse
-      than other alternatives. - `RANDOM`: Best splits among a set of random
-      candidate. Find the a categorical split of the form "value \\in mask"
-      using a random search. This solution can be seen as an approximation of
-      the CART algorithm. This method is a strong alternative to CART. This
-      algorithm is inspired from section "5.1 Categorical Variables" of "Random
-      Forest", 2001.
+      method is available for comparison purposes for classification problems
+      and generally performs worse than other alternatives. - `RANDOM`: Best
+      splits among a set of random candidates. Find the a categorical split of
+      the form "value \\in mask" using a random search. This solution can be
+      seen as an approximation of the CART algorithm. This method is a strong
+      alternative to CART. This algorithm is inspired from section "5.1
+      Categorical Variables" of "Random Forest", 2001.
         Default: "CART".
+    categorical_random_max_num_trials: For random categorical splits i.e.
+      `categorical_algorithm=RANDOM`. Maximum number of candidate splits
+      evaluated at each node. Defaults to 5000. Default: None.
+    categorical_random_num_trial_exponent: For random categorical splits i.e.
+      `categorical_algorithm=RANDOM`. Controls the number of random splits to
+      evaluate. The effective number of splits is
+      `min(categorical_random_max_num_trials, 32 + {vocab
+      size}^categorical_random_num_trial_exponent)`, with `vocab size` being the
+      number of unique categorical values in the node. Defaults to 2
+      Default: None.
     categorical_set_split_greedy_maximum_mask_size: For categorical set splits
       e.g. texts. Maximum number of attribute values on the positive side of the
       split mask. Smaller values might improve training speed but lead to worse
@@ -2916,12 +3041,15 @@ class CartLearner(generic_learner.GenericCCLearner):
       num_discretized_numerical_bins: int = 255,
       max_num_scanned_rows_to_infer_semantic: int = 100_000,
       max_num_scanned_rows_to_compute_statistics: int = 100_000,
+      label_classes: Optional[list[str]] = None,
       data_spec: Optional[data_spec_pb2.DataSpecification] = None,
       extra_training_config: Optional[
           abstract_learner_pb2.TrainingConfig
       ] = None,
       allow_na_conditions: bool = False,
       categorical_algorithm: str = "CART",
+      categorical_random_max_num_trials: Optional[int] = None,
+      categorical_random_num_trial_exponent: Optional[float] = None,
       categorical_set_split_greedy_maximum_mask_size: int = -1,
       categorical_set_split_greedy_sampling: float = 0.1,
       categorical_set_split_max_num_items: int = -1,
@@ -2975,6 +3103,10 @@ class CartLearner(generic_learner.GenericCCLearner):
     hyper_parameters = {
         "allow_na_conditions": allow_na_conditions,
         "categorical_algorithm": categorical_algorithm,
+        "categorical_random_max_num_trials": categorical_random_max_num_trials,
+        "categorical_random_num_trial_exponent": (
+            categorical_random_num_trial_exponent
+        ),
         "categorical_set_split_greedy_maximum_mask_size": (
             categorical_set_split_greedy_maximum_mask_size
         ),
@@ -3061,6 +3193,7 @@ class CartLearner(generic_learner.GenericCCLearner):
         num_discretized_numerical_bins=num_discretized_numerical_bins,
         max_num_scanned_rows_to_infer_semantic=max_num_scanned_rows_to_infer_semantic,
         max_num_scanned_rows_to_compute_statistics=max_num_scanned_rows_to_compute_statistics,
+        label_classes=label_classes,
     )
 
     deployment_config = self._build_deployment_config(
@@ -3074,6 +3207,7 @@ class CartLearner(generic_learner.GenericCCLearner):
         label=label,
         weights=weights,
         class_weights=class_weights,
+        custom_metrics=None,
         ranking_group=ranking_group,
         uplift_treatment=uplift_treatment,
         data_spec_args=data_spec_args,
@@ -3143,6 +3277,7 @@ class CartLearner(generic_learner.GenericCCLearner):
         require_label=True,
         support_custom_loss=False,
         support_return_in_bag_example_indices=False,
+        support_custom_metrics=False,
     )
 
   @classmethod

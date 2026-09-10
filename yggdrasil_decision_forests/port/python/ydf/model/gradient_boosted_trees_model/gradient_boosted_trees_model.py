@@ -38,15 +38,93 @@ class GradientBoostedTreesModel(decision_forest_model.DecisionForestModel):
     loss = self._model.validation_loss()
     return loss if not math.isnan(loss) else None
 
-  def initial_predictions(self) -> npt.NDArray[float]:
+  def initial_predictions(self) -> npt.NDArray[float]:  # pyrefly: ignore[bad-specialization]
     """Returns the model's initial predictions (i.e. the model bias)."""
     return self._model.initial_predictions()
 
   def set_initial_predictions(self, initial_predictions: Sequence[float]):
     """Sets the model's initial predictions (i.e. the model bias)."""
-    return self._model.set_initial_predictions(
-        np.asarray(initial_predictions, np.float32)
+    self._model.set_initial_predictions(
+        np.asarray(initial_predictions, np.float32)  # pyrefly: ignore[bad-argument-type]
     )
+
+  def output_logits(self) -> bool:
+    """If true, the model outputs logits instead of probabilities.
+
+    Only for classification models. If false, the model outputs probabilities.
+    This is `False` by default. Note that model probabilities are (by default)
+    not calibrated.
+
+    The value of `output_logits` is serialized with the model and persists if
+    the model is saved and loaded.
+
+    Usage example:
+
+    ```python
+    import pandas as pd
+    import ydf
+
+    # Train model
+    train_ds = pd.read_csv("train.csv")
+    model = ydf.GradientBoostedTreesLearner(
+        label="label", task=ydf.Task.CLASSIFICATION
+    ).train(train_ds)
+
+    # Check default value
+    print(f"Outputs logits: {model.output_logits()}")
+
+    # By default, predictions are probabilities
+    print("Probabilities:", model.predict(train_ds))
+
+    model.set_output_logits(True)
+    print(f"Outputs logits: {model.output_logits()}")
+    # Now, predictions are logits
+    print("Logits:", model.predict(train_ds))
+    ```
+
+    Returns:
+      Whether the model outputs logits.
+    """
+    return self._model.output_logits()
+
+  def set_output_logits(self, output_logits: bool) -> None:
+    """Sets whether the model outputs logits or probabilities.
+
+    Only for classification models. If false, the model outputs probabilities.
+    If true, the model outputs logits. This is `False` by default. Note that
+    model probabilities are (by default) not calibrated.
+
+    The value of `output_logits` is serialized with the model and persists if
+    the model is saved and loaded.
+
+    Usage example:
+
+    ```python
+    import pandas as pd
+    import ydf
+
+    # Train model
+    train_ds = pd.read_csv("train.csv")
+    model = ydf.GradientBoostedTreesLearner(
+        label="label", task=ydf.Task.CLASSIFICATION
+    ).train(train_ds)
+
+    # Check default value
+    print(f"Outputs logits: {model.output_logits()}")
+
+    # By default, predictions are probabilities
+    print("Probabilities:", model.predict(train_ds))
+
+    model.set_output_logits(True)
+    print(f"Outputs logits: {model.output_logits()}")
+    # Now, predictions are logits
+    print("Logits:", model.predict(train_ds))
+    ```
+
+    Args:
+      output_logits: Whether to output logits instead of probabilities.
+    """
+    self._model.set_output_logits(output_logits)
 
   def validation_evaluation(self) -> Optional[metric.Evaluation]:
     """Returns the validation evaluation of the model, if available.
@@ -78,7 +156,7 @@ class GradientBoostedTreesModel(decision_forest_model.DecisionForestModel):
       return None
     return metric.Evaluation(self._model.validation_evaluation())
 
-  def self_evaluation(self) -> Optional[metric.Evaluation]:
+  def self_evaluation(self) -> Optional[metric.Evaluation]:  # pyrefly: ignore[bad-override]
     """Returns the model's self-evaluation.
 
     For Gradient Boosted Trees models, the self-evaluation is the evaluation on
@@ -170,6 +248,7 @@ class GradientBoostedTreesModel(decision_forest_model.DecisionForestModel):
             iteration=entry.iteration,
             evaluation=metric.Evaluation(entry.validation_evaluation),
             training_evaluation=metric.Evaluation(entry.training_evaluation),
+            time=entry.time,
         )
         for entry in raw_training_logs
     ]
@@ -178,6 +257,33 @@ class GradientBoostedTreesModel(decision_forest_model.DecisionForestModel):
     """The number of trees trained per gradient boosting iteration."""
 
     return self._model.num_trees_per_iter()
+
+  def early_stopping_triggered(self) -> Optional[bool]:
+    """Returns whether the model training finished due to early stopping.
+
+    Gradient Boosted Trees models use a validation dataset to monitor
+    performance during training. If the validation loss stops improving, the
+    training process can be stopped before building all `num_trees` to prevent
+    overfitting.
+
+    - Returns `True` if training was stopped specifically because the early
+      stopping condition was met (validation loss stopped improving). Note
+      that this returns `True` for any early stopping strategy other than
+      `NONE`.
+    - Returns `False` if early stopping was not triggered. This happens if the
+      early stopping strategy is `NONE`, if the model trained to the maximum
+      number of trees (`num_trees`) and early stopping did not prune any trees
+      after, or if the training was interrupted for other reasons (e.g. timeout
+      or manual interruption).
+    - Returns `None` for models trained with older versions of YDF before this
+      property was introduced, as the reason for stopping is unknown.
+
+    Returns:
+      Whether early stopping was triggered (`True`/`False`), or `None` if
+      unavailable.
+    """
+
+    return self._model.early_stopping_triggered()
 
   def activation(self) -> custom_loss.Activation:
     """The model activation function."""

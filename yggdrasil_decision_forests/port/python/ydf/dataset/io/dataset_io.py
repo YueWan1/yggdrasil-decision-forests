@@ -87,15 +87,33 @@ def _unroll_column(
     return
 
   if src.ndim <= 1:
-    # The data is a numpy array containing objects that are numpy arrays.
-    # If the arrays all have the same size, using unrolled multi-dimensional
-    # features is better than CATEGORICAL_SET.
-    if src.ndim > 0 and src.size > 0 and isinstance(src[0], np.ndarray):
-      try:
-        # If columns can be stacked, do it to prevent accidental cast to
-        # CATEGORICAL_SET.
-        src = np.vstack(src)
-      except ValueError:
+    if src.ndim > 0 and src.size > 0:
+      # Find the first valid element to determine the shape/type
+      first_non_empty = next(
+          (x for x in src if not (isinstance(x, str) and not x)), None
+      )
+
+      if isinstance(first_non_empty, (list, tuple, np.ndarray)):
+        # Handle 0-D arrays (which have no len()) vs multi-dimensional items
+        if (
+            isinstance(first_non_empty, np.ndarray)
+            and first_non_empty.ndim == 0
+        ):
+          nan_fill = np.nan
+        else:
+          nan_fill = np.full(len(first_non_empty), np.nan)
+
+        # Replace empty strings uniformly
+        src_stacked = [
+            x if not (isinstance(x, str) and not x) else nan_fill for x in src
+        ]
+
+        try:
+          src = np.vstack(src_stacked)
+        except ValueError:
+          yield name, src, False
+          return
+      else:
         yield name, src, False
         return
     else:
@@ -104,8 +122,8 @@ def _unroll_column(
 
   if not allow_unroll:
     raise ValueError(
-        f"The column {name!r} is multi-dimensional (shape={src.shape}) while"
-        " the model requires this column to be single-dimensional (e.g."
+        f"The column {name!r} is multi-dimensional with shape {src.shape}."
+        " However, this column is expected to be single-dimensional (e.g.,"
         " shape=[num_examples])."
     )
 
@@ -289,7 +307,7 @@ def build_batched_example_generator(
   if pandas_io.is_pandas_dataframe(data):
     return pandas_io.PandasBatchedExampleGenerator(data)
   elif isinstance(data, dict):
-    return numpy_io.NumpyDictBatchedExampleGenerator(data)
+    return numpy_io.NumpyDictBatchedExampleGenerator(data)  # pyrefly: ignore[bad-argument-type]
   else:
     # TODO: Add support for other YDF dataset formats.
     raise ValueError(

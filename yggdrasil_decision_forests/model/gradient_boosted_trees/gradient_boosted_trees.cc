@@ -82,6 +82,9 @@ proto::Header GradientBoostedTreesModel::BuildHeaderProto() const {
   header.set_num_trees_per_iter(num_trees_per_iter_);
   header.set_validation_loss(validation_loss_);
   header.set_output_logits(output_logits_);
+  if (early_stopping_triggered_.has_value()) {
+    header.set_early_stopping_triggered(early_stopping_triggered_.value());
+  }
   *header.mutable_initial_predictions() = google::protobuf::RepeatedField<float>(
       initial_predictions_.begin(), initial_predictions_.end());
   *header.mutable_training_logs() = training_logs_;
@@ -97,6 +100,9 @@ void GradientBoostedTreesModel::ApplyHeaderProto(const proto::Header& header) {
   validation_loss_ = header.validation_loss();
   training_logs_ = header.training_logs();
   output_logits_ = header.output_logits();
+  if (header.has_early_stopping_triggered()) {
+    early_stopping_triggered_ = header.early_stopping_triggered();
+  }
   if (header.has_loss_configuration()) {
     loss_config_.CopyFrom(header.loss_configuration());
   }
@@ -290,7 +296,7 @@ absl::Status GradientBoostedTreesModel::PredictGetLeaves(
   return absl::OkStatus();
 }
 
-void GradientBoostedTreesModel::Predict(
+void GradientBoostedTreesModel::PredictImpl(
     const dataset::VerticalDataset& dataset,
     dataset::VerticalDataset::row_t row_idx,
     model::proto::Prediction* prediction) const {
@@ -309,21 +315,26 @@ void GradientBoostedTreesModel::Predict(
       auto* dist = prediction->mutable_classification()->mutable_distribution();
       dist->mutable_counts()->Resize(3, 0.f);
       dist->set_sum(1.f);
-
-      float proba_true;
-      if (output_logits_) {
-        proba_true = accumulator;
-      } else {
-        proba_true = 1.f / (1.f + std::exp(-accumulator));
-      }
+      // Sigmoid.
+      const float proba_true = 1.f / (1.f + std::exp(-accumulator));
       dist->set_counts(1, 1.f - proba_true);
       dist->set_counts(2, proba_true);
+
+      if (output_logits_) {
+        auto* logits = prediction->mutable_classification()->mutable_logits();
+        logits->mutable_counts()->Resize(3, 0.f);
+        logits->set_counts(1, -accumulator);
+        logits->set_counts(2, accumulator);
+        logits->set_sum(0.f);
+      }
     } break;
 
     case proto::Loss::MULTINOMIAL_LOG_LIKELIHOOD: {
+      DCHECK_EQ(num_trees_per_iter_, initial_predictions_.size());
       absl::FixedArray<float> accumulator(num_trees_per_iter_);
-      // Zero initial prediction for the MULTINOMIAL_LOG_LIKELIHOOD.
-      std::fill(accumulator.begin(), accumulator.end(), 0);
+      // Initialize accumulator with initial_predictions_.
+      std::copy(initial_predictions_.begin(), initial_predictions_.end(),
+                accumulator.begin());
 
       {
         int accumulator_cell_idx = 0;
@@ -344,6 +355,8 @@ void GradientBoostedTreesModel::Predict(
 
       // Top class.
       if (output_logits_) {
+        auto* logits = prediction->mutable_classification()->mutable_logits();
+        logits->mutable_counts()->Resize(num_trees_per_iter_ + 1, 0.f);
         float sum_logit = 0;
         int highest_cell_idx = 0;
         float highest_cell_value = 0;
@@ -351,41 +364,42 @@ void GradientBoostedTreesModel::Predict(
              accumulator_idx++) {
           auto value = accumulator[accumulator_idx];
           sum_logit += value;
-          dist->set_counts(accumulator_idx + 1, value);
+          logits->set_counts(accumulator_idx + 1, value);
           if (value > highest_cell_value) {
             highest_cell_value = value;
             highest_cell_idx = accumulator_idx;
           }
         }
         prediction->mutable_classification()->set_value(highest_cell_idx + 1);
-        dist->set_sum(sum_logit);
-      } else {
-        // Sum logits.
-        float sum_exp = 0;
-        for (int accumulator_idx = 0; accumulator_idx < num_trees_per_iter_;
-             accumulator_idx++) {
-          const float exp_val = std::exp(accumulator[accumulator_idx]);
-          sum_exp += exp_val;
-          // The offset of 1 between the class idx and the accumulator_idx is to
-          // skill the special OOD value with index 0.
-          dist->set_counts(accumulator_idx + 1, exp_val);
-        }
-        // Softmax
-        int highest_cell_idx = 0;
-        float highest_cell_value = 0;
-        const float normalization = (sum_exp > 0) ? (1.f / sum_exp) : 0.f;
-        for (int accumulator_idx = 0; accumulator_idx < num_trees_per_iter_;
-             accumulator_idx++) {
-          const float value = dist->counts(accumulator_idx + 1);
-          dist->set_counts(accumulator_idx + 1, value * normalization);
-          if (value > highest_cell_value) {
-            highest_cell_value = value;
-            highest_cell_idx = accumulator_idx;
-          }
-        }
-        prediction->mutable_classification()->set_value(highest_cell_idx + 1);
-        dist->set_sum(1.f);
+        logits->set_sum(sum_logit);
       }
+      int highest_cell_idx = 0;
+      float highest_cell_value = 0;
+      // Sum logits.
+      float sum_exp = 0;
+      // After this loop, `accumulator` holds the exponential of its previous
+      // values.
+      for (int accumulator_idx = 0; accumulator_idx < num_trees_per_iter_;
+           accumulator_idx++) {
+        const float exp_val = std::exp(accumulator[accumulator_idx]);
+        sum_exp += exp_val;
+        accumulator[accumulator_idx] = exp_val;
+
+        if (exp_val > highest_cell_value) {
+          highest_cell_value = exp_val;
+          highest_cell_idx = accumulator_idx;
+        }
+      }
+      // Softmax
+      const float normalization = (sum_exp > 0) ? (1.f / sum_exp) : 0.f;
+      for (int accumulator_idx = 0; accumulator_idx < num_trees_per_iter_;
+           accumulator_idx++) {
+        dist->set_counts(accumulator_idx + 1,
+                         accumulator[accumulator_idx] * normalization);
+      }
+      prediction->mutable_classification()->set_value(highest_cell_idx + 1);
+      dist->set_sum(1.f);
+
     } break;
     case proto::Loss::MEAN_AVERAGE_ERROR:
     case proto::Loss::SQUARED_ERROR: {
@@ -446,7 +460,7 @@ void GradientBoostedTreesModel::Predict(
   }
 }
 
-void GradientBoostedTreesModel::Predict(
+void GradientBoostedTreesModel::PredictImpl(
     const dataset::proto::Example& example,
     model::proto::Prediction* prediction) const {
   utils::usage::OnInference(1, metadata());
@@ -459,13 +473,21 @@ void GradientBoostedTreesModel::Predict(
                        accumulator += node.regressor().top_value();
                      });
       const float proba_true = 1. / (1. + std::exp(-accumulator));
-      prediction->mutable_classification()->set_value(proba_true > 0.5f ? 2
+      prediction->mutable_classification()->set_value(accumulator > 0.f ? 2
                                                                         : 1);
       auto* dist = prediction->mutable_classification()->mutable_distribution();
       dist->mutable_counts()->Resize(3, 0.f);
       dist->set_sum(1.f);
       dist->set_counts(1, 1.f - proba_true);
       dist->set_counts(2, proba_true);
+
+      if (output_logits_) {
+        auto* logits = prediction->mutable_classification()->mutable_logits();
+        logits->mutable_counts()->Resize(3, 0.f);
+        logits->set_counts(1, -accumulator);
+        logits->set_counts(2, accumulator);
+        logits->set_sum(0.f);
+      }
     } break;
 
     case proto::Loss::MULTINOMIAL_LOG_LIKELIHOOD: {
@@ -486,33 +508,56 @@ void GradientBoostedTreesModel::Predict(
         CHECK_EQ(accumulator_cell_idx, 0);
       }
 
-      // Note: Why the "+1"? : "prediction" reserves the first value for the out
-      // of vocabulary which is not taken into account in "accumulator'.
+      // Note: Why the "+1"? : "prediction" reserves the first value for the
+      // out of vocabulary which is not taken into account in "accumulator'.
 
+      if (output_logits_) {
+        auto* logits = prediction->mutable_classification()->mutable_logits();
+        logits->mutable_counts()->Resize(num_trees_per_iter_ + 1, 0.f);
+        float sum_logit = 0;
+        int highest_cell_idx = 0;
+        float highest_cell_value = 0;
+        for (int accumulator_idx = 0; accumulator_idx < num_trees_per_iter_;
+             accumulator_idx++) {
+          auto value = accumulator[accumulator_idx];
+          sum_logit += value;
+          logits->set_counts(accumulator_idx + 1, value);
+          if (value > highest_cell_value) {
+            highest_cell_value = value;
+            highest_cell_idx = accumulator_idx;
+          }
+        }
+        prediction->mutable_classification()->set_value(highest_cell_idx + 1);
+        logits->set_sum(sum_logit);
+      }
       auto* dist = prediction->mutable_classification()->mutable_distribution();
       dist->mutable_counts()->Resize(num_trees_per_iter_ + 1, 0.f);
 
+      // TODO: Use a more numerically stable method for softmax.
+      // https://www.deeplearningbook.org/contents/numerical.html
       float sum_exp = 0;
+      float highest_cell_value = 0;
+      int highest_cell_idx = 0;
+      // After this loop, `accumulator` holds the exponential of its previous
+      // values.
       for (int accumulator_idx = 0; accumulator_idx < num_trees_per_iter_;
            accumulator_idx++) {
         const float exp_val = std::exp(accumulator[accumulator_idx]);
         sum_exp += exp_val;
-        dist->set_counts(accumulator_idx + 1, exp_val);
+        accumulator[accumulator_idx] = exp_val;
+
+        if (exp_val > highest_cell_value) {
+          highest_cell_value = exp_val;
+          highest_cell_idx = accumulator_idx;
+        }
       }
 
       const float normalization = 1.f / sum_exp;
 
-      float highest_cell_value = 0;
-      int highest_cell_idx = 0;
-
       for (int accumulator_idx = 0; accumulator_idx < num_trees_per_iter_;
            accumulator_idx++) {
-        const float value = dist->counts(accumulator_idx + 1);
-        if (value > highest_cell_value) {
-          highest_cell_value = value;
-          highest_cell_idx = accumulator_idx;
-        }
-        dist->set_counts(accumulator_idx + 1, value * normalization);
+        dist->set_counts(accumulator_idx + 1,
+                         accumulator[accumulator_idx] * normalization);
       }
       dist->set_sum(1.f);
       prediction->mutable_classification()->set_value(highest_cell_idx + 1);
@@ -628,7 +673,8 @@ GradientBoostedTreesModel::ValidationEvaluation() const {
         training_logs_.number_of_trees_in_final_model()) {
       continue;
     }
-    // `log` is the training log that corresponds to the final model. Return it.
+    // `log` is the training log that corresponds to the final model. Return
+    // it.
     return internal::TrainingLogToEvaluationResults(
         log, training_logs_, task_, label_col_spec(), loss_config_,
         GetLossName(), internal::TrainingLogEvaluationSet::kValidation);
@@ -659,6 +705,12 @@ void GradientBoostedTreesModel::AppendDescriptionAndStatistics(
 
   absl::StrAppend(description,
                   "Node format: ", node_format_.value_or("NOT_SET"), "\n");
+
+  absl::StrAppend(description, "Early stopping triggered: ",
+                  early_stopping_triggered_.has_value()
+                      ? (early_stopping_triggered_.value() ? "true" : "false")
+                      : "NOT_SET",
+                  "\n");
 
   StrAppendForestStructureStatistics(data_spec(), decision_trees(),
                                      description);
@@ -940,8 +992,7 @@ metric::proto::EvaluationResults TrainingLogToEvaluationResults(
     const proto::TrainingLogs::Entry& log_entry,
     const proto::TrainingLogs& training_logs, const model::proto::Task& task,
     const dataset::proto::Column& label_col_spec,
-    const proto::LossConfiguration& loss_config,
-    const absl::string_view loss_name,
+    const proto::LossConfiguration& loss_config, const std::string& loss_name,
     const TrainingLogEvaluationSet eval_set) {
   metric::proto::EvaluationResults evaluation;
   evaluation.set_task(task);
@@ -949,9 +1000,14 @@ metric::proto::EvaluationResults TrainingLogToEvaluationResults(
   evaluation.set_loss_value(eval_set == TrainingLogEvaluationSet::kValidation
                                 ? log_entry.validation_loss()
                                 : log_entry.training_loss());
+  int secondary_metric_size =
+      eval_set == TrainingLogEvaluationSet::kValidation
+          ? log_entry.validation_secondary_metrics_size()
+          : log_entry.training_secondary_metrics_size();
+  secondary_metric_size = std::min(secondary_metric_size,
+                                   training_logs.secondary_metric_names_size());
 
-  for (int metrix_idx = 0;
-       metrix_idx < training_logs.secondary_metric_names_size(); metrix_idx++) {
+  for (int metrix_idx = 0; metrix_idx < secondary_metric_size; metrix_idx++) {
     const auto& metric_name = training_logs.secondary_metric_names(metrix_idx);
     const auto metric_value =
         eval_set == TrainingLogEvaluationSet::kValidation
@@ -961,14 +1017,15 @@ metric::proto::EvaluationResults TrainingLogToEvaluationResults(
     if (metric_name == "accuracy") {
       evaluation.mutable_classification()->set_accuracy(metric_value);
     } else if (metric_name == "rmse") {
-      evaluation.mutable_regression()->set_sum_square_error(metric_value);
+      evaluation.mutable_regression()->set_sum_square_error(metric_value *
+                                                            metric_value);
       evaluation.set_count_predictions(1.f);
     } else if (absl::StartsWith(metric_name, "NDCG@")) {
       evaluation.mutable_ranking()->mutable_ndcg()->set_value(metric_value);
       evaluation.mutable_ranking()->set_ndcg_truncation(
           loss_config.lambda_mart_ndcg().ndcg_truncation());
     } else {
-      LOG(WARNING) << "Unknown metric name:" << metric_name;
+      (*evaluation.mutable_user_metrics())[metric_name] = metric_value;
     }
   }
   if (task == model::proto::Task::CLASSIFICATION &&

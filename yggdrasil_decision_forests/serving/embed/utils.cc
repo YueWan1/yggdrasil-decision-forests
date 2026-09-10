@@ -16,14 +16,19 @@
 #include "yggdrasil_decision_forests/serving/embed/utils.h"
 
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "yggdrasil_decision_forests/serving/embed/embed.pb.h"
 
@@ -40,14 +45,44 @@ const absl::flat_hash_map<char, std::string> kReplacements = {
 
 }  // namespace
 
-absl::Status CheckModelName(absl::string_view value) {
-  for (const char c : value) {
-    if (!std::islower(c) && !std::isdigit(c) && c != '_') {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid model name: ", value,
-                       ". The model name can only contain lowercase letters, "
-                       "numbers, and _."));
-    }
+bool IsJava(const proto::Options& options) {
+  return options.language_case() == proto::Options::kJava;
+}
+
+bool IsCpp(const proto::Options& options) {
+  return options.language_case() == proto::Options::kCpp;
+}
+
+bool IsC(const proto::Options& options) {
+  return options.language_case() == proto::Options::kC;
+}
+
+absl::Status CheckModelName(absl::string_view value,
+                            proto::Options::LanguageCase language) {
+  switch (language) {
+    case proto::Options::kCpp:
+    case proto::Options::kC:
+      for (const char c : value) {
+        if (!std::islower(c) && !std::isdigit(c) && c != '_') {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Invalid model name: ", value,
+              ". The model name can only contain lowercase letters, "
+              "numbers, and _."));
+        }
+      }
+      break;
+    case proto::Options::kJava:
+      for (const char c : value) {
+        if (!std::isalnum(c)) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Invalid model name: ", value,
+              ". The model name can only contain alphanumeric characters."));
+        }
+      }
+      break;
+    case proto::Options::kCc:
+    case proto::Options::LANGUAGE_NOT_SET:
+      return absl::InternalError("Unsupported language or language not set");
   }
   return absl::OkStatus();
 }
@@ -103,9 +138,11 @@ std::string StringToSnakeCaseSymbol(const std::string_view input,
 
     const auto replace_it = kReplacements.find(ch);
     if (replace_it != kReplacements.end()) {
-      if (!result.empty() && !last_char_was_separator) {
+      last_char_was_separator = true;
+      if (to_upper) {
+        absl::StrAppend(&result, absl::AsciiStrToUpper(replace_it->second));
+      } else {
         absl::StrAppend(&result, replace_it->second);
-        last_char_was_separator = true;
       }
     }
 
@@ -124,12 +161,30 @@ std::string StringToConstantSymbol(const absl::string_view input) {
   return StringToSnakeCaseSymbol(input, true, 'V');
 }
 
+std::string StringToJavaEnumConstant(absl::string_view input) {
+  return StringToSnakeCaseSymbol(input, true, 'V');
+}
+
 std::string StringToVariableSymbol(const absl::string_view input) {
   return StringToSnakeCaseSymbol(input, false, 'v');
 }
 
 std::string StringToStructSymbol(const absl::string_view input,
                                  const bool ensure_letter_first) {
+  return StringToCamelCase(input, ensure_letter_first);
+}
+
+std::string StringToLowerCamelCase(absl::string_view input,
+                                   bool ensure_letter_first) {
+  auto camel_case = StringToCamelCase(input, ensure_letter_first);
+  if (!camel_case.empty()) {
+    camel_case[0] = std::tolower(camel_case[0]);
+  }
+  return camel_case;
+}
+
+std::string StringToCamelCase(absl::string_view input,
+                              bool ensure_letter_first) {
   if (input.empty()) {
     return "";
   }
@@ -201,6 +256,20 @@ uint32_t NumBytesToMaxUnsignedValue(int bytes) {
   }
 }
 
+int32_t NumBytesToMaxSignedValue(int bytes) {
+  switch (bytes) {
+    case 1:
+      return 0x7f;
+    case 2:
+      return 0x7fff;
+    case 4:
+      return 0x7fffffff;
+    default:
+      DCHECK(false);
+      return 0;
+  }
+}
+
 int MaxSignedValueToNumBytes(int32_t value) {
   if (value <= 0x7f && value >= -0x80) {
     return 1;
@@ -217,11 +286,25 @@ std::string UnsignedInteger(int bytes) {
 std::string SignedInteger(int bytes) {
   return absl::StrCat("int", bytes * 8, "_t");
 }
+std::string JavaInteger(int bytes) {
+  switch (bytes) {
+    case 1:
+      return "byte";
+    case 2:
+      return "short";
+    case 4:
+      return "int";
+    case 8:
+      return "long";
+    default:
+      DCHECK(false) << "Invalid number of bytes for JavaInteger: " << bytes;
+      return "";
+  }
+}
 
-std::string DTypeToCCType(const proto::DType::Enum value) {
+std::string DTypeToCppType(const proto::DType::Enum value) {
   switch (value) {
     case proto::DType::UNDEFINED:
-      DCHECK(false);
       return "UNDEFINED";
 
     case proto::DType::INT8:
@@ -246,6 +329,62 @@ std::string DTypeToCCType(const proto::DType::Enum value) {
   }
 }
 
+std::string KernelDTypeToCppType(const proto::DType::Enum value) {
+  switch (value) {
+    case proto::DType::UNDEFINED:
+      return "UNDEFINED";
+
+    case proto::DType::INT8:
+      return "s8";
+    case proto::DType::INT16:
+      return "s16";
+    case proto::DType::INT32:
+      return "s32";
+
+    case proto::DType::UINT8:
+      return "u8";
+    case proto::DType::UINT16:
+      return "u16";
+    case proto::DType::UINT32:
+      return "u32";
+
+    case proto::DType::FLOAT32:
+      return "s32";
+
+    case proto::DType::BOOL:
+      // The Linux kernel supports 'bool' via <linux/types.h>
+      return "bool";
+  }
+}
+
+std::string DTypeToJavaType(const proto::DType::Enum value) {
+  switch (value) {
+    case proto::DType::UNDEFINED:
+      DCHECK(false);
+      return "UNDEFINED";
+
+    case proto::DType::INT8:
+      return "byte";
+    case proto::DType::INT16:
+      return "short";
+    case proto::DType::INT32:
+      return "int";
+
+    case proto::DType::UINT8:
+      return "byte";
+    case proto::DType::UINT16:
+      return "short";
+    case proto::DType::UINT32:
+      return "int";
+
+    case proto::DType::FLOAT32:
+      return "float";
+
+    case proto::DType::BOOL:
+      return "boolean";
+  }
+}
+
 proto::DType::Enum UnsignedIntegerToDtype(int bytes) {
   switch (bytes) {
     case 1:
@@ -260,6 +399,52 @@ proto::DType::Enum UnsignedIntegerToDtype(int bytes) {
   }
 }
 
+absl::StatusOr<std::string> FormatExampleLiteral(const DoubleOrInt64& val,
+                                                 const bool is_float) {
+  if (is_float) {
+    if (IsDouble(val)) {
+      // Ensure it always prints with a decimal to be treated as a float in
+      // C/C++
+      std::string s = absl::StrCat(AsDouble(val));
+      return s;
+    } else {
+      return absl::InternalError(
+          "Expected float value but found integer in variant.");
+    }
+  } else {
+    if (IsInt(val)) {
+      return absl::StrCat(AsInt(val));
+    } else {
+      return absl::InternalError(
+          "Expected integer value but found float in variant.");
+    }
+  }
+}
+
+absl::StatusOr<std::string> StorageToPrimitiveType(const int bytes,
+                                                   const bool is_float,
+                                                   const bool is_signed) {
+  if (is_float) {
+    if (bytes == 4) return "float";
+    if (bytes == 8) return "double";
+  } else {
+    if (is_signed) {
+      if (bytes == 1) return "int8_t";
+      if (bytes == 2) return "int16_t";
+      if (bytes == 4) return "int32_t";
+      if (bytes == 8) return "int64_t";
+    } else {
+      if (bytes == 1) return "uint8_t";
+      if (bytes == 2) return "uint16_t";
+      if (bytes == 4) return "uint32_t";
+      if (bytes == 8) return "uint64_t";
+    }
+  }
+  return absl::InvalidArgumentError(
+      absl::StrCat("Unsupported storage type: bytes=", bytes,
+                   " float=", is_float, " signed=", is_signed));
+}
+
 int NumLeavesToNumNodes(int num_leaves) {
   DCHECK_GE(num_leaves, 0);
   if (num_leaves == 0) {
@@ -270,6 +455,70 @@ int NumLeavesToNumNodes(int num_leaves) {
 
 std::string QuoteString(absl::string_view input) {
   return absl::StrCat("\"", absl::CEscape(input), "\"");
+}
+
+std::string IndentString(absl::string_view input, int num_spaces) {
+  DCHECK_GE(num_spaces, 0);
+  if (input.empty()) {
+    return "";
+  }
+  std::string prefix = std::string(num_spaces, ' ');
+  std::vector<std::string> lines;
+  for (const auto& line : absl::StrSplit(input, '\n')) {
+    if (!line.empty()) {
+      lines.push_back(absl::StrCat(prefix, line));
+    } else {
+      lines.push_back("");
+    }
+  }
+  return absl::StrJoin(lines, "\n");
+}
+
+std::vector<uint8_t> PackBoolVector(const std::vector<bool>& input) {
+  std::vector<uint8_t> output;
+  output.reserve((input.size() + 7) / 8);
+  for (size_t i = 0; i < input.size(); i += 8) {
+    uint8_t byte = 0;
+    for (size_t j = 0; j < 8 && i + j < input.size(); ++j) {
+      if (input[i + j]) {
+        byte |= (static_cast<uint8_t>(1) << j);
+      }
+    }
+    output.push_back(byte);
+  }
+  return output;
+}
+
+absl::StatusOr<std::string> KernelStorageToPrimitiveType(const int bytes,
+                                                         const bool is_float,
+                                                         const bool is_signed) {
+  if (is_float) {
+    if (bytes == 4) return "s32";
+    if (bytes == 8) return "s64";
+  } else {
+    if (is_signed) {
+      if (bytes == 1) return "s8";
+      if (bytes == 2) return "s16";
+      if (bytes == 4) return "s32";
+      if (bytes == 8) return "s64";
+    } else {
+      if (bytes == 1) return "u8";
+      if (bytes == 2) return "u16";
+      if (bytes == 4) return "u32";
+      if (bytes == 8) return "u64";
+    }
+  }
+  return absl::InvalidArgumentError(
+      absl::StrCat("Unsupported kernel storage type: bytes=", bytes,
+                   " float=", is_float, " signed=", is_signed));
+}
+
+std::string KernelUnsignedInteger(const int bytes) {
+  return absl::StrCat("u", bytes * 8);
+}
+
+std::string KernelSignedInteger(const int bytes) {
+  return absl::StrCat("s", bytes * 8);
 }
 
 }  // namespace yggdrasil_decision_forests::serving::embed

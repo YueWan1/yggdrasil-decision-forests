@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-#ifndef YGGDRASIL_DECISION_FORESTS_PORT_PYTHON_YDF_LEARNER_MODEL_H_
-#define YGGDRASIL_DECISION_FORESTS_PORT_PYTHON_YDF_LEARNER_MODEL_H_
+#ifndef YGGDRASIL_DECISION_FORESTS_PORT_PYTHON_YDF_MODEL_MODEL_WRAPPER_H_
+#define YGGDRASIL_DECISION_FORESTS_PORT_PYTHON_YDF_MODEL_MODEL_WRAPPER_H_
 
 #include <pybind11/numpy.h>
 
@@ -108,7 +108,7 @@ class GenericCCModel {
   absl::StatusOr<py::bytes> Serialize() const;
 
   // Embedding of the model.
-  absl::StatusOr<std::unordered_map<std::string, std::string>> EmbedModel(
+  absl::StatusOr<std::unordered_map<std::string, py::bytes>> EmbedModel(
       const serving::embed::proto::Options& options) const;
 
   // TODO: Allow passing the output array as a parameter to reduce heap
@@ -150,9 +150,7 @@ class GenericCCModel {
     return model_->data_spec();
   }
 
-  void set_data_spec(const dataset::proto::DataSpecification& data_spec) {
-    *model_->mutable_data_spec() = data_spec;
-  }
+  void set_data_spec(const dataset::proto::DataSpecification& data_spec);
 
   model::proto::Metadata metadata() const;
 
@@ -167,13 +165,13 @@ class GenericCCModel {
 
   absl::StatusOr<
       absl::flat_hash_map<std::string, model::proto::VariableImportanceSet>>
-  VariableImportances() const;
+  VariableImportances();
 
   void invalidate_engine() { invalidate_engine_ = true; }
 
   void ForceEngine(std::optional<std::string> engine_name) {
     // TODO: Let the user configure inference without an engine.
-    utils::concurrency::MutexLock lock(&engine_mutex_);
+    utils::concurrency::MutexLock lock(engine_mutex_);
     force_engine_name_ = engine_name;
     invalidate_engine();
   }
@@ -211,4 +209,4 @@ class GenericCCModel {
 
 }  // namespace yggdrasil_decision_forests::port::python
 
-#endif  // YGGDRASIL_DECISION_FORESTS_PORT_PYTHON_YDF_LEARNER_MODEL_H_
+#endif  // YGGDRASIL_DECISION_FORESTS_PORT_PYTHON_YDF_MODEL_MODEL_WRAPPER_H_

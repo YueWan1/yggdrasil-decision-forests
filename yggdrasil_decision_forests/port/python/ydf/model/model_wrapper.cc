@@ -62,7 +62,7 @@ namespace yggdrasil_decision_forests::port::python {
 
 absl::StatusOr<std::shared_ptr<const serving::FastEngine>>
 GenericCCModel::GetEngine() {
-  utils::concurrency::MutexLock lock(&engine_mutex_);
+  utils::concurrency::MutexLock lock(engine_mutex_);
   if (engine_ == nullptr || invalidate_engine_) {
     RETURN_IF_ERROR(model_->Validate());
     ASSIGN_OR_RETURN(engine_, model_->BuildFastEngine(force_engine_name_));
@@ -213,7 +213,7 @@ absl::StatusOr<py::array_t<float>> GenericCCModel::PredictWithFastEngine(
                                   size_t block_size) -> Cache {
       Cache cache;
       cache.batch_of_examples = engine->AllocateExamples(block_size);
-      cache.batch_of_predictions.resize(block_size);
+      cache.batch_of_predictions.resize(block_size * num_prediction_dimensions);
       return cache;
     };
 
@@ -224,6 +224,7 @@ absl::StatusOr<py::array_t<float>> GenericCCModel::PredictWithFastEngine(
       RETURN_IF_ERROR(CopyVerticalDatasetToAbstractExampleSet(
           dataset, begin_item_idx, end_item_idx, engine_features,
           cache->batch_of_examples.get()));
+      // Note: Predict resizes the output vector if needed.
       engine->Predict(*cache->batch_of_examples, effective_batch_size,
                       &cache->batch_of_predictions);
 
@@ -276,35 +277,42 @@ absl::StatusOr<py::array_t<float>> GenericCCModel::PredictWithSlowEngine(
   }
   predictions.resize({total_num_examples * num_prediction_dimensions});
 
-  struct Cache {
-    model::proto::Prediction prediction;
-  };
+  auto unchecked_predictions = predictions.mutable_unchecked();
 
-  const auto create_cache = [&](size_t thread_idx, size_t num_threads,
-                                size_t block_size) -> Cache { return {}; };
+  {
+    py::gil_scoped_release release;
 
-  const auto run = [&, num_prediction_dimensions](
-                       size_t block_idx, size_t begin_item_idx,
-                       size_t end_item_idx, Cache* cache) -> absl::Status {
-    for (size_t example_idx = begin_item_idx; example_idx < end_item_idx;
-         example_idx++) {
-      model_->Predict(dataset, example_idx, &cache->prediction);
-      auto float_prediction = absl::MakeSpan(
-          predictions.mutable_data(example_idx * num_prediction_dimensions),
-          num_prediction_dimensions);
-      model::ProtoToFloatPrediction(cache->prediction, model_->task(),
-                                    float_prediction);
-    }
+    struct Cache {
+      model::proto::Prediction prediction;
+    };
 
-    return absl::OkStatus();
-  };
+    const auto create_cache = [&](size_t thread_idx, size_t num_threads,
+                                  size_t block_size) -> Cache { return {}; };
 
-  RETURN_IF_ERROR(utils::concurrency::ConcurrentForLoopWithWorker<Cache>(
-      /*num_items=*/total_num_examples,
-      /*max_num_threads=*/num_threads,
-      /*min_block_size=*/100,    // At least 100 examples in a batch
-      /*max_block_size=*/10000,  // No more than 10k examples in a batch
-      create_cache, run));
+    const auto run = [&, num_prediction_dimensions](
+                         size_t block_idx, size_t begin_item_idx,
+                         size_t end_item_idx, Cache* cache) -> absl::Status {
+      for (size_t example_idx = begin_item_idx; example_idx < end_item_idx;
+           example_idx++) {
+        model_->Predict(dataset, example_idx, &cache->prediction);
+        auto float_prediction =
+            absl::MakeSpan(unchecked_predictions.mutable_data(
+                               example_idx * num_prediction_dimensions),
+                           num_prediction_dimensions);
+        model::ProtoToFloatPrediction(cache->prediction, model_->task(),
+                                      float_prediction);
+      }
+
+      return absl::OkStatus();
+    };
+
+    RETURN_IF_ERROR(utils::concurrency::ConcurrentForLoopWithWorker<Cache>(
+        /*num_items=*/total_num_examples,
+        /*max_num_threads=*/num_threads,
+        /*min_block_size=*/100,    // At least 100 examples in a batch
+        /*max_block_size=*/10000,  // No more than 10k examples in a batch
+        create_cache, run));
+  }
 
   if (num_prediction_dimensions > 1) {
     predictions =
@@ -320,6 +328,7 @@ absl::StatusOr<metric::proto::EvaluationResults> GenericCCModel::Evaluate(
     const bool use_slow_engine, const int num_threads) {
   py::gil_scoped_release release;
   auto effective_options = options;
+  effective_options.set_num_threads(num_threads);
   if (weighted && model_->weights().has_value()) {
     ASSIGN_OR_RETURN(*effective_options.mutable_weights(),
                      dataset::GetUnlinkedWeightDefinition(
@@ -333,7 +342,7 @@ absl::StatusOr<metric::proto::EvaluationResults> GenericCCModel::Evaluate(
         group_col_idx == model_->ranking_group_col_idx() &&
         effective_options.task() == model_->task()) {
       // Model default evaluation
-      return model_->Evaluate(dataset, effective_options, &rnd);
+      return model_->EvaluateWithStatus(dataset, effective_options, &rnd);
     } else {
       // Model evaluation with overrides
       return model_->EvaluateOverrideType(dataset, effective_options,
@@ -366,7 +375,7 @@ GenericCCModel::Analyze(const dataset::VerticalDataset& dataset,
   ASSIGN_OR_RETURN(const auto analysis,
                    utils::model_analysis::Analyse(*model_, dataset, options));
   return utils::model_analysis::CreateStandaloneAnalysis(*model_, dataset, "",
-                                                         "", analysis);
+                                                         "", analysis, false);
 }
 
 absl::StatusOr<utils::model_analysis::proto::PredictionAnalysisResult>
@@ -408,13 +417,15 @@ absl::StatusOr<py::bytes> GenericCCModel::Serialize() const {
   return py::bytes(serialized_model);
 }
 
-absl::StatusOr<std::unordered_map<std::string, std::string>>
+absl::StatusOr<std::unordered_map<std::string, py::bytes>>
 GenericCCModel::EmbedModel(
     const serving::embed::proto::Options& options) const {
-  std::unordered_map<std::string, std::string> std_result;
+  std::unordered_map<std::string, py::bytes> std_result;
   ASSIGN_OR_RETURN(const auto absl_result,
                    serving::embed::EmbedModel(*model_, options));
-  std_result.insert(absl_result.begin(), absl_result.end());
+  for (const auto& [key, value] : absl_result) {
+    std_result[key] = py::bytes(value);
+  }
   return std_result;
 }
 
@@ -439,7 +450,7 @@ absl::StatusOr<std::string> GenericCCModel::Describe(
 
 absl::StatusOr<
     absl::flat_hash_map<std::string, model::proto::VariableImportanceSet>>
-GenericCCModel::VariableImportances() const {
+GenericCCModel::VariableImportances() {
   RETURN_IF_ERROR(model_->PrecomputeVariableImportances(
       model_->AvailableVariableImportances()));
   return model_->precomputed_variable_importances();
@@ -461,29 +472,23 @@ absl::StatusOr<BenchmarkInferenceCCResult> GenericCCModel::Benchmark(
 
   // Run engines.
   ASSIGN_OR_RETURN(const auto engine, GetEngine());
-  RETURN_IF_ERROR(
-      utils::BenchmarkFastEngine(options, *engine, *model_, dataset, &results));
-
-  RETURN_IF_ERROR(utils::BenchmarkFastEngineMultiThreaded(
-      options, *engine, *model_, dataset, num_threads, &results));
-
-  if (results.empty()) {
-    return absl::InternalError("No benchmark results.");
-  }
-
-  const auto& single_thread_result = results[0];
-  const auto& multi_thread_result = results[1];
+  ASSIGN_OR_RETURN(
+      const auto single_thread_result,
+      utils::BenchmarkFastEngine(options, *engine, *model_, dataset));
+  ASSIGN_OR_RETURN(const auto multi_thread_result,
+                   utils::BenchmarkFastEngineMultiThreaded(
+                       options, *engine, *model_, dataset, num_threads));
 
   return BenchmarkInferenceCCResult{
       .duration_per_example =
           absl::ToDoubleSeconds(single_thread_result.duration_per_example),
       .benchmark_duration =
-          absl::ToDoubleSeconds(single_thread_result.duration_per_example),
+          absl::ToDoubleSeconds(single_thread_result.benchmark_duration),
       .num_runs = single_thread_result.num_runs,
       .duration_per_example_multithread =
           absl::ToDoubleSeconds(multi_thread_result.duration_per_example),
       .benchmark_duration_multithread =
-          absl::ToDoubleSeconds(multi_thread_result.duration_per_example),
+          absl::ToDoubleSeconds(multi_thread_result.benchmark_duration),
       .num_runs_multithread = multi_thread_result.num_runs,
       .num_threads = num_threads,
       .batch_size = single_thread_result.batch_size,
@@ -498,13 +503,19 @@ std::optional<int> GenericCCModel::weight_col_idx() const {
   return model_->weights()->attribute_idx();
 }
 
+void GenericCCModel::set_data_spec(
+    const dataset::proto::DataSpecification& data_spec) {
+  *model_->mutable_data_spec() = data_spec;
+  invalidate_engine();
+}
+
 std::string BenchmarkInferenceCCResult::ToString() const {
   return absl::StrFormat(
       R"BLOCK(Single-thread inference time per example: %.3f us (microseconds)
-Details: %d predictions in %.3f seconds
+Details: %zu predictions in %.3f seconds
 
 Multi-thread inference time per example: %.3f us (microseconds)
-Details: %d predictions in %.3f seconds using %d threads
+Details: %zu predictions in %.3f seconds using %d threads
 
 * Measured with the C++ serving API. See model.to_cpp().)BLOCK",
       duration_per_example * 1000000, num_examples * num_runs,

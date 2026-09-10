@@ -268,6 +268,8 @@ from $0yggdrasil_decision_forests.dataset import data_spec_pb2
 from $0yggdrasil_decision_forests.learner import abstract_learner_pb2
 from $1dataset import dataset
 from $1dataset import dataspec
+from $1learner import custom_loss
+from $1learner import custom_metric
 from $1learner import generic_learner
 from $1learner import hyperparameters
 from $1learner import tuner as tuner_lib
@@ -276,7 +278,6 @@ from $1model.gradient_boosted_trees_model import gradient_boosted_trees_model
 from $1model.isolation_forest_model import isolation_forest_model
 from $1model.random_forest_model import random_forest_model
 from $1utils import func_helpers
-from $1cc import ydf
 )",
                                          prefix, pydf_prefix);
 
@@ -312,7 +313,8 @@ absl::Status AppendCapabilityParameters(
     const LearnerConfig& learner_config,
     const model::proto::LearnerCapabilities& capabilities,
     std::string* fields_documentation, std::string* fields_constructor,
-    std::string* deployment_config_constructor) {
+    std::string* deployment_config_constructor,
+    std::string* custom_metrics_arg) {
   if (learner_config.support_distributed_training) {
     absl::StrAppend(fields_documentation, R"(
     workers: If set, enable distributed training. "workers" is the list of IP
@@ -349,8 +351,8 @@ absl::Status AppendCapabilityParameters(
   }
   if (capabilities.support_custom_loss()) {
     absl::StrReplaceAll(
-        {{"loss: Optional[str]",
-          "loss: Optional[Union[str, custom_loss.AbstractCustomLoss]]"}},
+        {{"loss: str = \"DEFAULT\"",
+          "loss: Union[str, custom_loss.AbstractCustomLoss] = \"DEFAULT\""}},
         fields_constructor);
     absl::StrReplaceAll(
         {{"Mean average error a.k.a. MAE.",
@@ -359,6 +361,19 @@ absl::Status AppendCapabilityParameters(
           "custom losses, the link function is deactivated (aka "
           "apply_link_function is always False)."}},
         fields_documentation);
+  }
+
+  if (capabilities.support_custom_metrics()) {
+    absl::StrAppend(fields_documentation,
+                    R"(
+    custom_metrics: A list of custom metrics to compute during training.
+    )");
+    absl::StrAppend(fields_constructor, R"(
+      custom_metrics: Optional[List[custom_metric.AbstractCustomMetric]] = None,
+    )");
+    absl::StrAppend(custom_metrics_arg, "custom_metrics");
+  } else {
+    absl::StrAppend(custom_metrics_arg, "None");
   }
   return absl::OkStatus();
 }
@@ -440,6 +455,11 @@ absl::StatusOr<std::string> GenSingleLearnerWrapper(
       reading, but skew statistics in the dataspec, which can hurt model quality
       (e.g. if an important category of a categorical feature is considered
       OOV). Set to -1 to scan the entire dataset.
+    label_classes: An ordered list of possible values for the label. This
+      argument is optional and typically not required. If not provided, the
+      label classes are determined automatically from the dataset. If provided,
+      it forces a specific order for the label classes. All label values
+      present in the dataset must be included in this list.
     data_spec: Dataspec to be used (advanced). If a data spec is given,
       `columns`, `include_all_columns`, `max_vocab_count`,
       `min_vocab_frequency`, `discretize_numerical_columns` and 
@@ -470,6 +490,7 @@ absl::StatusOr<std::string> GenSingleLearnerWrapper(
       num_discretized_numerical_bins: int = 255,
       max_num_scanned_rows_to_infer_semantic: int = 100_000,
       max_num_scanned_rows_to_compute_statistics: int = 100_000,
+      label_classes: Optional[list[str]] = None,
       data_spec: Optional[data_spec_pb2.DataSpecification] = None,
       extra_training_config: Optional[abstract_learner_pb2.TrainingConfig] = None,
 )",
@@ -613,9 +634,11 @@ absl::StatusOr<std::string> GenSingleLearnerWrapper(
       R"(        num_threads=num_threads,
         working_dir=working_dir,
 )";
+
+  std::string custom_metrics_args;
   RETURN_IF_ERROR(AppendCapabilityParameters(
       learner_config, capabilities, &fields_documentation, &fields_constructor,
-      &deployment_config_constructor));
+      &deployment_config_constructor, &custom_metrics_args));
 
   // Pre-configured hyper-parameters.
   std::string hp_template_dict;
@@ -705,6 +728,7 @@ $4
         num_discretized_numerical_bins=num_discretized_numerical_bins,
         max_num_scanned_rows_to_infer_semantic=max_num_scanned_rows_to_infer_semantic,
         max_num_scanned_rows_to_compute_statistics=max_num_scanned_rows_to_compute_statistics,
+        label_classes=label_classes,
     )
 
     deployment_config = self._build_deployment_config(
@@ -716,6 +740,7 @@ $8
       label=label,
       weights=weights,
       class_weights=class_weights,
+      custom_metrics=$9,
       ranking_group=ranking_group,
       uplift_treatment=uplift_treatment,
       data_spec_args=data_spec_args,
@@ -779,7 +804,8 @@ $8
                             /*$5*/ free_text_documentation,
                             /*$6*/ nice_learner_name,
                             /*$7*/ learner_config.model_class_name,
-                            /*$8*/ deployment_config_constructor);
+                            /*$8*/ deployment_config_constructor,
+                            /*$9*/ custom_metrics_args);
 
   const auto bool_rep = [](const bool value) -> std::string {
     return value ? "True" : "False";
@@ -799,6 +825,7 @@ $8
       require_label=$6,
       support_custom_loss=$7,
       support_return_in_bag_example_indices=$8,
+      support_custom_metrics=$9,
     )
 )",
       /*$0*/ bool_rep(capabilities.support_max_training_duration()),
@@ -809,7 +836,8 @@ $8
       /*$5*/ bool_rep(capabilities.support_monotonic_constraints()),
       /*$6*/ bool_rep(capabilities.require_label()),
       /*$7*/ bool_rep(capabilities.support_custom_loss()),
-      /*$8*/ bool_rep(capabilities.support_return_in_bag_example_indices()));
+      /*$8*/ bool_rep(capabilities.support_return_in_bag_example_indices()),
+      /*$9*/ bool_rep(capabilities.support_custom_metrics()));
 
   if (hp_template_dict == "{}") {
     absl::StrAppend(&wrapper, R"(

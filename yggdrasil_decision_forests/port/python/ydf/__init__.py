@@ -76,11 +76,13 @@ from ydf.dataset.dataspec import Column as Feature
 from ydf.dataset.dataspec import Column
 from ydf.model.generic_model import Task
 from ydf.dataset.dataspec import Semantic
+from ydf.dataset.dataspec import Monotonic
 from ydf.learner.worker import start_worker
 from ydf.utils.log import strict
 
 # Advanced Utilities
 from ydf.model.generic_model import ModelIOOptions
+from ydf.dataset.dataset import VerticalDataset
 from ydf.dataset.dataset import create_vertical_dataset
 from ydf.model.model_metadata import ModelMetadata
 from ydf.model.model_lib import from_tensorflow_decision_forests
@@ -108,6 +110,10 @@ from ydf.learner.custom_loss import BinaryClassificationLoss
 from ydf.learner.custom_loss import MultiClassificationLoss
 from ydf.learner.custom_loss import Activation
 
+# Custom Metric
+from ydf.learner.custom_metric import RegressionMetric
+from ydf.learner.custom_metric import BinaryClassificationMetric
+from ydf.learner.custom_metric import MultiClassificationMetric
 
 # Tree
 from ydf.model import tree

@@ -56,8 +56,8 @@ CustomMultiClassificationLoss::RegistrationCreate(
         "The dataset is a binary classification dataset. Please use a binary "
         "classification loss.");
   }
-  return absl::make_unique<CustomMultiClassificationLoss>(
-      args, dimension, custom_loss_functions);
+  return std::make_unique<CustomMultiClassificationLoss>(args, dimension,
+                                                         custom_loss_functions);
 }
 
 absl::StatusOr<std::vector<float>>
@@ -107,8 +107,8 @@ absl::Status CustomMultiClassificationLoss::UpdateGradients(
   return absl::OkStatus();
 }
 
-std::vector<std::string> CustomMultiClassificationLoss::SecondaryMetricNames()
-    const {
+std::vector<std::string>
+CustomMultiClassificationLoss::InternalSecondaryMetricNames() const {
   return {};
 }
 

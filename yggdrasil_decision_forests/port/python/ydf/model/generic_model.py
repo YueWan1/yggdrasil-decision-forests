@@ -94,8 +94,8 @@ class Task(enum.Enum):
       raise NotImplementedError(f"Unsupported task {self}")
 
   @classmethod
-  def _from_proto_type(cls, task: abstract_model_pb2.Task):
-    task = PROTO_TO_TASK.get(task)
+  def _from_proto_type(cls, proto_task: abstract_model_pb2.Task):
+    task = PROTO_TO_TASK.get(proto_task)
     if task is None:
       raise NotImplementedError(f"Unsupported task {task}")
     return task
@@ -177,11 +177,13 @@ class TrainingLogEntry:
     training_evaluation: Optional evaluation metrics computed on the training
       dataset at the given iteration. This is generally less insightful than the
       main `evaluation` but can be useful for debugging.
+    time: Duration, in seconds, since the start of the training.
   """
 
   iteration: int
   evaluation: metric.Evaluation
   training_evaluation: Optional[metric.Evaluation]
+  time: Optional[float] = None
 
 
 class GenericModel(abc.ABC):
@@ -793,7 +795,7 @@ Use `model.describe()` for more details.
       algorithm: Literal["IF_ELSE", "ROUTING"] = "ROUTING",
       classification_output: Literal["CLASS", "SCORE", "PROBABILITY"] = "CLASS",
       categorical_from_string: bool = False,
-  ) -> Union[str, Dict[str, str]]:
+  ) -> Union[str, Dict[str, bytes]]:
     """Generates standalone, dependency-free C++ code for model inference.
 
     This method is ideal for size-critical applications. See `to_cpp` for an
@@ -861,6 +863,76 @@ Use `model.describe()` for more details.
     raise NotImplementedError
 
   @abc.abstractmethod
+  def to_standalone_java(
+      self,
+      name: str = "YdfModel",
+      package_name: str = "com.example.ydfmodel",
+      classification_output: Literal["CLASS", "SCORE", "PROBABILITY"] = "CLASS",
+  ) -> Dict[str, bytes]:
+    """Generates standalone, dependency-free Java code for model inference.
+
+    This method is ideal for size-critical applications.
+
+    **How to use:**
+
+    1.  Call this function to get the generated code and data:
+        ```python
+        model = ydf.load_model(...)
+        java_files = model.to_standalone_java(
+            name="MyYdfModel",
+            package_name="com.mycompany.myproject"
+        )
+        ```
+
+    2.  The function returns a dictionary containing two items:
+        - Key: `{name}.java` (e.g., "MyYdfModel.java"): Value is the Java source
+          code as bytes.
+        - Key: `{name}Data.bin` (e.g., "MyYdfModelData.bin"): Value is the
+          binary model data as bytes.
+
+    3.  Save these files to your Java project:
+        ```python
+        with open(f"{name}.java", "wb") as f:
+            f.write(java_files[f"{name}.java"])
+        with open(f"{name}Data.bin", "wb") as f:
+            f.write(java_files[f"{name}Data.bin"])
+        ```
+        Place the `{name}Data.bin` file in the Java classpath, typically in the
+        resources directory.
+
+    4.  In your Java code, import the generated class and use the static
+        `predict` method:
+        ```java
+        import com.mycompany.myproject.MyYdfModel;
+
+        // Create an Instance with feature values.
+        // Categorical features are represented by enums in the generated class.
+        MyYdfModel.Instance instance = new MyYdfModel.Instance(
+            5.0f, // Numerical feature
+            MyYdfModel.FeatureF2.kRed // Categorical feature
+        );
+
+        // Get the prediction.
+        float prediction = MyYdfModel.predict(instance);
+        ```
+        The `predict` function is thread-safe. The generated class also
+        contains enums for all categorical features.
+
+    Args:
+      name: A name for the model, used to create the Java class name.
+      package_name: The Java package name for the generated class.
+      classification_output: The output format for classification models. -
+        "CLASS" (default): The predicted class enum. - "SCORE": The raw scores
+        (e.g., logits) for all classes. - "PROBABILITY": The probabilities for
+        all classes.
+
+    Returns:
+      A dictionary of filename to source code. This includes the Java source
+      file and a binary resource file containing the model data.
+    """
+    raise NotImplementedError
+
+  @abc.abstractmethod
   def to_tensorflow_saved_model(  # pylint: disable=dangerous-default-value
       self,
       path: str,
@@ -879,17 +951,17 @@ Use `model.describe()` for more details.
   ) -> None:
     """Exports the model as a TensorFlow SavedModel.
 
-    This function requires TensorFlow and TensorFlow Decision Forests to be
+    This function requires TensorFlow and the ydf-tf package to be
     installed. Install them by running the command `pip install
-    tensorflow_decision_forests`. The generated SavedModel relies on the
-    TensorFlow Decision Forests Custom Inference Op. This op is available by
+    ydf-tf`. The generated SavedModel relies on the
+    YDF Custom Inference Op. This op is available by
     default in various platforms such as Servomatic, TensorFlow Serving, Vertex
     AI, and TensorFlow.js.
 
     Usage example:
 
     ```python
-    !pip install tensorflow_decision_forests
+    !pip install ydf-tf
 
     import ydf
     import numpy as np
@@ -1089,6 +1161,7 @@ Use `model.describe()` for more details.
       force: Tries to export even in currently unsupported environments.
         WARNING: Setting this to true may crash the Python runtime.
     """
+
     raise NotImplementedError
 
   @abc.abstractmethod
@@ -1098,12 +1171,11 @@ Use `model.describe()` for more details.
       can_be_saved: bool = True,
       squeeze_binary_classification: bool = True,
       force: bool = False,
-  ) -> "tensorflow.Module":  # pylint: disable=undefined-variable
+  ) -> "tensorflow.Module":  # pylint: disable=undefined-variable  # pyrefly: ignore[unknown-name]
     """Converts the model into a callable TensorFlow Module (`@tf.function`).
 
     This allows the YDF model to be integrated into larger TensorFlow graphs.
-    Requires `tensorflow_decision_forests` (`pip install
-    tensorflow_decision_forests`).
+    Requires `ydf-tf` (`pip install ydf-tf`).
 
     Note: Export to TensorFlow is not yet available for Anomaly Detection
     models.
@@ -1150,8 +1222,8 @@ Use `model.describe()` for more details.
       jit: bool = True,
       apply_activation: bool = True,
       leaves_as_params: bool = False,
-      compatibility: Union[str, "export_jax.Compatibility"] = "XLA",  # pylint: disable=undefined-variable
-  ) -> "export_jax.JaxModel":  # pylint: disable=undefined-variable
+      compatibility: Union[str, "export_jax.Compatibility"] = "XLA",  # pylint: disable=undefined-variable  # pyrefly: ignore[unknown-name]
+  ) -> "export_jax.JaxModel":  # pylint: disable=undefined-variable  # pyrefly: ignore[unknown-name]
     """Converts the model into a JAX function for use in JAX ecosystems.
 
     Usage example:
@@ -1587,7 +1659,7 @@ class GenericCCModel(GenericModel):
       self, value: Optional[feature_selector_logs.FeatureSelectorLogs]
   ) -> None:
     if value is None:
-      self._model.set_feature_selection_logs(None)
+      self._model.set_feature_selection_logs(None)  # pyrefly: ignore[bad-argument-type]
     else:
       self._model.set_feature_selection_logs(
           feature_selector_logs.value_to_proto(value)
@@ -1937,7 +2009,7 @@ class GenericCCModel(GenericModel):
       algorithm: Literal["IF_ELSE", "ROUTING"] = "ROUTING",
       classification_output: Literal["CLASS", "SCORE", "PROBABILITY"] = "CLASS",
       categorical_from_string: bool = False,
-  ) -> Union[str, Dict[str, str]]:
+  ) -> Union[str, Dict[str, bytes]]:
     options = embed_pb2.Options(
         name=name,
         classification_output=embed_pb2.ClassificationOutput.Enum.Value(
@@ -1945,13 +2017,28 @@ class GenericCCModel(GenericModel):
         ),
         algorithm=embed_pb2.Algorithm.Enum.Value(algorithm),
         categorical_from_string=categorical_from_string,
-        cc=embed_pb2.CC(),
+        cpp=embed_pb2.Cpp(),
     )
     results = self._model.EmbedModel(options)
     if len(results) == 1:
-      return list(results.values())[0]
+      return list(results.values())[0].decode()
     else:
       return results
+
+  def to_standalone_java(
+      self,
+      name: str = "YdfModel",
+      package_name: str = "com.example.ydfmodel",
+      classification_output: Literal["CLASS", "SCORE", "PROBABILITY"] = "CLASS",
+  ) -> Dict[str, bytes]:
+    options = embed_pb2.Options(
+        name=name,
+        classification_output=embed_pb2.ClassificationOutput.Enum.Value(
+            classification_output
+        ),
+        java=embed_pb2.Java(package_name=package_name),
+    )
+    return self._model.EmbedModel(options)
 
   # TODO: Change default value of "mode" before 1.0 release.
   def to_tensorflow_saved_model(  # pylint: disable=dangerous-default-value
@@ -2006,7 +2093,7 @@ class GenericCCModel(GenericModel):
       can_be_saved: bool = True,
       squeeze_binary_classification: bool = True,
       force: bool = False,
-  ) -> "tensorflow.Module":  # pylint: disable=undefined-variable
+  ) -> "tensorflow.Module":  # pylint: disable=undefined-variable  # pyrefly: ignore[unknown-name]
     # TODO: Add tensorflow support for anomaly detection.
     if self.task() == Task.ANOMALY_DETECTION:
       raise ValueError(
@@ -2025,8 +2112,8 @@ class GenericCCModel(GenericModel):
       jit: bool = True,
       apply_activation: bool = True,
       leaves_as_params: bool = False,
-      compatibility: Union[str, "export_jax.Compatibility"] = "XLA",  # pylint: disable=undefined-variable
-  ) -> "export_jax.JaxModel":  # pylint: disable=undefined-variable
+      compatibility: Union[str, "export_jax.Compatibility"] = "XLA",  # pylint: disable=undefined-variable  # pyrefly: ignore[unknown-name]
+  ) -> "export_jax.JaxModel":  # pylint: disable=undefined-variable  # pyrefly: ignore[unknown-name]
     return _get_export_jax().to_jax_function(
         model=self,
         jit=jit,
@@ -2143,7 +2230,7 @@ class GenericCCModel(GenericModel):
     effective_dataspec = self._model.data_spec()
 
     def find_existing_or_add_column(
-        semantic: Optional[Any],
+        semantic: Optional[data_spec_pb2.ColumnType],
         name: Optional[str],
         default_col_idx: int,
         usage: str,
@@ -2344,16 +2431,9 @@ def _get_export_jax():
 
 
 def _get_export_tf():
-  try:
-    from ydf.model import export_tf  # pylint: disable=g-import-not-at-top,import-outside-toplevel # pytype: disable=import-error
+  from ydf.model import export_tf  # pylint: disable=g-import-not-at-top,import-outside-toplevel # pytype: disable=import-error
 
-    return export_tf
-  except ImportError as exc:
-    raise ValueError(
-        '"tensorflow_decision_forests" is needed by this function. Make sure'
-        " it is installed and try again. If using pip, run `pip install"
-        " tensorflow_decision_forests`."
-    ) from exc
+  return export_tf
 
 
 def _get_export_sklearn():

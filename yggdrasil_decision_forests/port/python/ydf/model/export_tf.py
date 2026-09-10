@@ -14,6 +14,7 @@
 
 """Utilities to export TF models."""
 
+import functools
 import logging
 import math
 import shutil
@@ -34,11 +35,8 @@ from ydf.utils import log
 # pylint: disable=g-import-not-at-top
 try:
   import tensorflow as tf
-  import tensorflow_decision_forests as tfdf
-except ImportError as exc:
-  raise ImportError(
-      "Cannot import tensorflow or tensorflow_decision_forests."
-  ) from exc
+except ImportError as tf_exc:
+  raise ImportError("Export to TensorFlow requires TensorFlow.") from tf_exc
 # pylint: enable=g-import-not-at-top
 # pytype: enable=import-error
 
@@ -46,59 +44,45 @@ except ImportError as exc:
 TFDType = Any  # TensorFlow DType e.g. tf.float32
 TFTensor = Any  # A TensorFlow Tensor i.e. tensorflow.Tensor
 
-# Mapping between YDF dtype and TF dtypes.
-_YDF_DTYPE_TO_TF_DTYPE: Dict["ds_pb.DType", TFDType] = None
 
-# Mapping TF dtypes to the TF dtype compatible with tensorflow example.
-# Note that tensorflow example proto only support tf.int64, tf.float32,
-# and tf.string dtypes.
-_TF_DTYPE_TO_TF_EXAMPLE_DTYPE: Dict[TFDType, TFDType] = None
-
-
+@functools.cache
 def mapping_ydf_dtype_to_tf_dtype() -> Dict["ds_pb.DType", TFDType]:
   """Mapping between YDF dtype and TF dtypes."""
-
-  global _YDF_DTYPE_TO_TF_DTYPE
-  if _YDF_DTYPE_TO_TF_DTYPE is None:
-    _YDF_DTYPE_TO_TF_DTYPE = {
-        ds_pb.DType.DTYPE_INT8: tf.int8,
-        ds_pb.DType.DTYPE_INT16: tf.int16,
-        ds_pb.DType.DTYPE_INT32: tf.int32,
-        ds_pb.DType.DTYPE_INT64: tf.int64,
-        ds_pb.DType.DTYPE_UINT8: tf.uint8,
-        ds_pb.DType.DTYPE_UINT16: tf.uint16,
-        ds_pb.DType.DTYPE_UINT32: tf.uint32,
-        ds_pb.DType.DTYPE_UINT64: tf.uint64,
-        ds_pb.DType.DTYPE_FLOAT16: tf.float16,
-        ds_pb.DType.DTYPE_FLOAT32: tf.float32,
-        ds_pb.DType.DTYPE_FLOAT64: tf.float64,
-        ds_pb.DType.DTYPE_BOOL: tf.bool,
-        ds_pb.DType.DTYPE_BYTES: tf.string,
-    }
-  return _YDF_DTYPE_TO_TF_DTYPE
+  return {
+      ds_pb.DType.DTYPE_INT8: tf.int8,
+      ds_pb.DType.DTYPE_INT16: tf.int16,
+      ds_pb.DType.DTYPE_INT32: tf.int32,
+      ds_pb.DType.DTYPE_INT64: tf.int64,
+      ds_pb.DType.DTYPE_UINT8: tf.uint8,
+      ds_pb.DType.DTYPE_UINT16: tf.uint16,
+      ds_pb.DType.DTYPE_UINT32: tf.uint32,
+      ds_pb.DType.DTYPE_UINT64: tf.uint64,
+      ds_pb.DType.DTYPE_FLOAT16: tf.float16,
+      ds_pb.DType.DTYPE_FLOAT32: tf.float32,
+      ds_pb.DType.DTYPE_FLOAT64: tf.float64,
+      ds_pb.DType.DTYPE_BOOL: tf.bool,
+      ds_pb.DType.DTYPE_BYTES: tf.string,
+  }
 
 
+@functools.cache
 def mapping_tf_dtype_to_tf_example_dtype() -> Dict[TFDType, TFDType]:
   """Mapping TF dtypes to the TF dtype compatible with tensorflow example."""
-
-  global _TF_DTYPE_TO_TF_EXAMPLE_DTYPE
-  if _TF_DTYPE_TO_TF_EXAMPLE_DTYPE is None:
-    _TF_DTYPE_TO_TF_EXAMPLE_DTYPE = {
-        tf.int8: tf.int64,
-        tf.int16: tf.int64,
-        tf.int32: tf.int64,
-        tf.int64: tf.int64,
-        tf.uint8: tf.int64,
-        tf.uint16: tf.int64,
-        tf.uint32: tf.int64,
-        tf.uint64: tf.int64,
-        tf.float16: tf.float32,
-        tf.float32: tf.float32,
-        tf.float64: tf.float32,
-        tf.bool: tf.int64,
-        tf.string: tf.string,
-    }
-  return _TF_DTYPE_TO_TF_EXAMPLE_DTYPE
+  return {
+      tf.int8: tf.int64,
+      tf.int16: tf.int64,
+      tf.int32: tf.int64,
+      tf.int64: tf.int64,
+      tf.uint8: tf.int64,
+      tf.uint16: tf.int64,
+      tf.uint32: tf.int64,
+      tf.uint64: tf.int64,
+      tf.float16: tf.float32,
+      tf.float32: tf.float32,
+      tf.float64: tf.float32,
+      tf.bool: tf.int64,
+      tf.string: tf.string,
+  }
 
 
 def ydf_model_to_tensorflow_saved_model(
@@ -176,6 +160,14 @@ def ydf_model_to_tensorflow_saved_model_keras_mode(
     input_model_signature_fn: Any,
     temp_dir: Optional[str],
 ):  # pylint: disable=g-doc-args
+
+  try:
+    import tensorflow_decision_forests as tfdf  # pylint: disable=g-import-not-at-top,import-outside-toplevel # pytype:disable=import-error
+  except ImportError as exc:
+    raise ImportError(
+        "Export to Keras is deprecated, will be removed soon and requires"
+        " tensorflow-decision-forests. Users should use the mode='tf' instead."
+    ) from exc
 
   # Do not pass input_model_signature_fn if it is None.
   not_none_params = {}
@@ -378,13 +370,31 @@ def ydf_model_to_tf_function(  # pytype: disable=name-error
     temp_dir: Optional[str],
     can_be_saved: bool,
     squeeze_binary_classification: bool,
-) -> "tensorflow.Module":  # pylint: disable=g-doc-args
+) -> "tensorflow.Module":  # pylint: disable=g-doc-args  # pyrefly: ignore[unknown-name]
   """Converts a YDF model to a TensorFlow function.
 
   See GenericModel.to_tensorflow_function for the documentation.
   """
 
-  tf_op = tfdf.keras.core.tf_op
+  try:
+    import ydf_tf  # pylint: disable=g-import-not-at-top,import-outside-toplevel # pytype:disable=import-error
+
+    tf_op = ydf_tf.tf_op
+  except ImportError as exc:
+    # Try to import tensorflow decision forests (legacy).
+    try:
+      import tensorflow_decision_forests as tfdf  # pylint: disable=g-import-not-at-top,import-outside-toplevel # pytype:disable=import-error
+
+      tf_op = tfdf.keras.core.tf_op
+      log.warning(
+          "Using TF-DF for the TensorFlow export. Prefer ydf-tf instead.",
+          message_id=log.WarningMessage.USING_TFDF_FOR_EXPORT,
+      )
+    except ImportError:
+      raise ImportError(
+          "Use the `ydf_tf` library to export models to TensorFlow. You can"
+          " install it with `pip install ydf_tf`."
+      ) from exc
 
   # Using prefixes ensure multiple models can be combined in a single
   # SavedModel.
@@ -422,7 +432,7 @@ def ydf_model_to_tf_function(  # pytype: disable=name-error
 
     @tf.function
     def __call__(self, features):
-      return self.call(features)
+      return self.call(features)  # pyrefly: ignore[missing-attribute]
 
   callable_module = CallableModule()
 
@@ -436,8 +446,8 @@ def ydf_model_to_tf_function(  # pytype: disable=name-error
     else:
       return dense_predictions
 
-  callable_module.call = call
-  callable_module.op_model = op_model  # Link model resources
+  callable_module.call = call  # pyrefly: ignore[missing-attribute]
+  callable_module.op_model = op_model  # Link model resources  # pyrefly: ignore[missing-attribute]
   return callable_module
 
 
@@ -478,16 +488,38 @@ def tf_feature_dtype_manual(
     return tf_dtype
 
   # DType from feature semantic
-  if column_spec.type == ds_pb.NUMERICAL:
+  if column_spec.type in [
+      ds_pb.ColumnType.NUMERICAL,
+      ds_pb.ColumnType.DISCRETIZED_NUMERICAL,
+  ]:
     return tf.float32
-  elif column_spec.type == ds_pb.CATEGORICAL:
+  elif column_spec.type == ds_pb.ColumnType.CATEGORICAL:
     return tf.string
-  elif column_spec.type == ds_pb.BOOLEAN:
+  elif column_spec.type == ds_pb.ColumnType.BOOLEAN:
     return tf.int64
-  elif column_spec.type == ds_pb.CATEGORICAL_SET:
+  elif column_spec.type == ds_pb.ColumnType.CATEGORICAL_SET:
     return tf.string
   else:
     raise ValueError(f"Unsupported semantic: {column_spec.type}")
+
+
+def _unrolled_sub_feature_names(
+    unstacked: ds_pb.Unstacked,
+    data_spec: ds_pb.DataSpecification,
+) -> Sequence[str]:
+  """Returns the sub-feature names for an unstacked column from data_spec."""
+  if (
+      unstacked.HasField("begin_column_idx")
+      and unstacked.begin_column_idx >= 0
+      and unstacked.begin_column_idx + unstacked.size <= len(data_spec.columns)
+  ):
+    return [
+        data_spec.columns[unstacked.begin_column_idx + dim_idx].name
+        for dim_idx in range(unstacked.size)
+    ]
+  return dataset_io.unrolled_feature_names(
+      unstacked.original_name, unstacked.size
+  )
 
 
 def tensorflow_raw_input_signature(
@@ -506,11 +538,9 @@ def tensorflow_raw_input_signature(
   for unstacked in model_dataspec.unstackeds:
     if unstacked.size == 0:
       raise RuntimeError("Empty unstacked")
-    sub_names = dataset_io.unrolled_feature_names(
-        unstacked.original_name, unstacked.size
-    )
+    sub_names = _unrolled_sub_feature_names(unstacked, model_dataspec)
     # Note: The "input_features" contain unrolled feature names.
-    if sub_names[0] not in input_feature_names_set:
+    if not any(sub_name in input_feature_names_set for sub_name in sub_names):
       continue
 
     tf_dtype = tf_feature_dtype_manual(
@@ -596,11 +626,9 @@ def tensorflow_feature_spec(
   for unstacked in model_dataspec.unstackeds:
     if unstacked.size == 0:
       raise RuntimeError("Empty unstacked")
-    sub_names = dataset_io.unrolled_feature_names(
-        unstacked.original_name, unstacked.size
-    )
+    sub_names = _unrolled_sub_feature_names(unstacked, model_dataspec)
     # Note: The "input_features" contain unrolled feature names.
-    if sub_names[0] not in input_feature_names_set:
+    if not any(sub_name in input_feature_names_set for sub_name in sub_names):
       continue
 
     tf_dtype = tf_feature_dtype_manual(
@@ -700,14 +728,13 @@ def _unroll_dict(
     # Unroll multi-dim features.
     input_features_set = set(input_features)
     for unstacked in data_spec.unstackeds:
-      sub_names = dataset_io.unrolled_feature_names(
-          unstacked.original_name, unstacked.size
-      )
-      if sub_names[0] not in input_features_set:
+      sub_names = _unrolled_sub_feature_names(unstacked, data_spec)
+      if not any(sub_name in input_features_set for sub_name in sub_names):
         continue
       value = src[unstacked.original_name]
       for dim_idx, sub_name in enumerate(sub_names):
-        dst[sub_name] = value[:, dim_idx]
+        if sub_name in input_features_set:
+          dst[sub_name] = value[:, dim_idx]
 
     # Copy single-dim features
     for column in data_spec.columns:

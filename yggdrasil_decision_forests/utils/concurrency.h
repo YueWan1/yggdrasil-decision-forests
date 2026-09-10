@@ -95,6 +95,14 @@ void ConcurrentForLoop(
     const std::function<void(size_t block_idx, size_t begin_item_idx,
                              size_t end_item_idx)>& function);
 
+// Like ConcurrentForLoop, but supports an absl::Status returned by the workers.
+// If any worker does not return ok, this function returns the status returned
+// by the first non-ok worker.
+absl::Status ConcurrentForLoopWithStatus(
+    size_t num_blocks, ThreadPool* thread_pool, size_t num_items,
+    const std::function<absl::Status(size_t block_idx, size_t begin_item_idx,
+                                     size_t end_item_idx)>& function);
+
 // "ConcurrentForLoopWithWorker" applies "run" function over a range of elements
 // using multi-threading.
 //
@@ -132,7 +140,7 @@ absl::Status ConcurrentForLoopWithWorker(
     const std::function<absl::Status(size_t block_idx, size_t begin_item_idx,
                                      size_t end_item_idx, Cache* cache)>
         run) {
-  if (max_num_threads == 1) {
+  if (max_num_threads <= 1) {
     // Execute all the runs sequentially.
     const auto block_size = std::min(max_block_size, num_items);
     auto cache = create_cache(0, 1, block_size);
@@ -187,7 +195,7 @@ absl::Status ConcurrentForLoopWithWorker(
       const auto status = run(block_idx, begin_item_idx, end_item_idx, &cache);
       // Record job status.
       if (!status.ok()) {
-        MutexLock l(&global_status_mutex);
+        MutexLock l(global_status_mutex);
         global_status.Update(status);
         has_failure = true;
       }

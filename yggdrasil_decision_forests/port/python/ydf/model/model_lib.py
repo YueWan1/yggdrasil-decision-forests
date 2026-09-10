@@ -82,6 +82,7 @@ def transform_tfdf_categorical_columns(
 def load_model(
     directory: str,
     advanced_options: generic_model.ModelIOOptions = generic_model.ModelIOOptions(),
+    verbose: bool = True,
 ) -> generic_model.ModelType:
   """Load a YDF model from disk.
 
@@ -115,18 +116,20 @@ def load_model(
   Args:
     directory: Directory containing the model.
     advanced_options: Advanced options for model loading.
+    verbose: Print information.
 
   Returns:
     Model to use for inference, evaluation or inspection
   """
-  if advanced_options.file_prefix is not None:
-    log.info(
-        "Loading model with prefix %s from %s",
-        advanced_options.file_prefix,
-        directory,
-    )
-  else:
-    log.info("Loading model from %s", directory)
+  if verbose:
+    if advanced_options.file_prefix is not None:
+      log.info(
+          "Loading model with prefix %s from %s",
+          advanced_options.file_prefix,
+          directory,
+      )
+    else:
+      log.info("Loading model from %s", directory)
   model_is_tfdf = is_saved_model(directory)
 
   if model_is_tfdf:
@@ -152,17 +155,17 @@ def load_cc_model(cc_model: ydf_cc.GenericCCModel) -> generic_model.ModelType:
   """
   model_name = cc_model.name()
   if model_name == ydf_cc.RandomForestCCModel.kRegisteredName:
-    return random_forest_model.RandomForestModel(cc_model)
+    return random_forest_model.RandomForestModel(cc_model)  # pyrefly: ignore[bad-return]
   if model_name == ydf_cc.GradientBoostedTreesCCModel.kRegisteredName:
-    return gradient_boosted_trees_model.GradientBoostedTreesModel(cc_model)
+    return gradient_boosted_trees_model.GradientBoostedTreesModel(cc_model)  # pyrefly: ignore[bad-return]
   if model_name == ydf_cc.IsolationForestCCModel.kRegisteredName:
-    return isolation_forest_model.IsolationForestModel(cc_model)
+    return isolation_forest_model.IsolationForestModel(cc_model)  # pyrefly: ignore[bad-return]
   log.info(
       "This model has type %s, which is not fully supported. Only generic model"
       " tasks (e.g. inference) are possible",
       model_name,
   )
-  return generic_model.GenericCCModel(cc_model)
+  return generic_model.GenericCCModel(cc_model)  # pyrefly: ignore[bad-return]
 
 
 def from_tensorflow_decision_forests(directory: str) -> generic_model.ModelType:

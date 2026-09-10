@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/attributes.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -48,6 +49,65 @@
 #include "yggdrasil_decision_forests/utils/random.h"
 
 namespace yggdrasil_decision_forests::model::decision_tree {
+
+namespace internal {
+struct NodeAndExamples {
+  // The current node
+  NodeWithChildren* node;
+  // Indices of examples in the node.
+  SelectedExamplesRollingBuffer selected_examples;
+  // Indices of examples in the leaf.
+  std::optional<SelectedExamplesRollingBuffer> leaf_examples;
+  // Depth of the node.
+  int32_t depth;
+  // Constraints on the node.
+  NodeConstraints constraints;
+  // If true, the leaf value of the node has already been set.
+  bool set_leaf_already_set;
+};
+
+// Initializes the item mask i.e. the bitmap of the items to consider or to
+// ignore in the greedy selection for categorical-set attributes. An item is
+// masked if:
+//   1. It is "pure" i.e. the item is present in all or in none of the examples.
+//   2. The item has been sampled-out (see
+//   "categorical_set_split_greedy_sampling" in "dt_config").
+//   3. The item is pruned by the maximum number of items (see
+//   "categorical_set_split_max_num_items" in "dt_config").
+// Return true iff at least one item is non masked.
+bool MaskPureSampledOrPrunedAttributeValuesForCategoricalSetGreedySelection(
+    const proto::DecisionTreeTrainingConfig& dt_config,
+    int32_t num_attribute_classes,
+    absl::Span<const UnsignedExampleIdx> selected_examples,
+    const std::vector<int64_t>&
+        count_examples_without_weights_by_attribute_class,
+    std::vector<bool>* candidate_attributes_bitmap,
+    std::vector<int>* candidate_attributes_list, utils::RandomEngine* random);
+
+// Create the histogram bins (i.e. candidate threshold values) for an histogram
+// based split finding on a numerical attribute.
+absl::StatusOr<std::vector<float>> GenHistogramBins(
+    proto::NumericalSplit::Type type, int num_splits,
+    absl::Span<const float> attributes, float min_value, float max_value,
+    utils::RandomEngine* random);
+
+// Sets in "positive_examples" and "negative_examples" the examples from
+// "examples" that evaluate respectively positively and negatively to the
+// condition "condition". The items in "examples" are expected to be sorted.
+// When the function returns, "examples" might not be sorted anymore.
+// "positive_examples" and "negative_examples" will be pointing to subsets of
+// "examples".
+//
+// If "examples_are_training_examples=true", optimizes the allocation by
+// assuming "examples" are the examples used to train the tree.
+absl::StatusOr<ExampleSplitRollingBuffer> SplitExamplesInPlace(
+    const dataset::VerticalDataset& dataset,
+    SelectedExamplesRollingBuffer examples,
+    const proto::NodeCondition& condition, bool dataset_is_dense,
+    bool error_on_wrong_splitter_statistics,
+    bool examples_are_training_examples = true);
+
+}  // namespace internal
 
 struct InternalTrainConfig;
 
@@ -79,6 +139,17 @@ struct SplitterPerThreadCache {
 
   std::vector<int> numerical_features;
   std::vector<float> projection_values;
+
+  std::vector<int> catset_candidate_attributes_list;
+  std::vector<std::vector<UnsignedExampleIdx>> catset_examples_by_candidate;
+  std::vector<bool> catset_candidate_attributes_bitmap;
+  std::vector<int> catset_positive_attributes_vector;
+  std::vector<bool> catset_positive_selected_example_bitmap;
+  std::vector<int64_t> catset_count_examples_without_weights_by_attribute_class;
+  std::vector<utils::NormalDistributionDouble>
+      catset_stats_examples_containing_attr_value;
+  std::vector<utils::BinaryToNormalDistributionDouble>
+      catset_attribute_distributions_regression;
 
   PerThreadCacheV2 cache_v2;
 
@@ -240,28 +311,28 @@ struct InternalTrainConfig {
   CreateSetLeafValueFunctor set_leaf_value_functor = SetLabelDistribution;
 
   // If true, the split score relies on a hessian: ~gradient^2/hessian (+
-  // regularization). This is only possible for regression. Require
-  // hessian_leaf=true.
+  // regularization). This is only possible for regression.
   //
   // If false, the split score is a classical decision tree score. e.g.,
   // reduction of variance in the case of regression.
   bool hessian_score = false;
 
-  // If true, the leaf relies on the hessian. This is only possible for
-  // regression.
-  bool hessian_leaf = false;
-
-  // Index of the hessian column in the dataset. Only used if hessian_leaf=true.
+  // Index of the hessian column in the dataset.
   int hessian_col_idx = -1;
 
-  // Index of the gradient column in the dataset.  Only used if
-  // hessian_leaf=true.
+  // Index of the gradient column in the dataset.
   int gradient_col_idx = -1;
 
   // Regularization terms for hessian_score=true.
   float hessian_l1 = 0.f;
   float hessian_l2_numerical = 0.f;
   float hessian_l2_categorical = 0.f;
+
+  // Minimum sum of hessians in a leaf for use_hessian_gain=true.
+  // Splits that would violate this constraint are ignored. Note that score and
+  // leaf value computations independently clamp the hessian denominator to
+  // kMinHessianForNewtonStep (0.001) for numerical stability.
+  double min_sum_hessian_in_leaf = 0.0;
 
   // Non owning pointer to pre-processing information.
   // Depending on the decision tree configuration this field might be required.
@@ -805,7 +876,7 @@ FindSplitLabelRegressionFeatureCategoricalSetGreedyForward(
     const proto::DecisionTreeTrainingConfig& dt_config,
     const utils::NormalDistributionDouble& label_distribution,
     int32_t attribute_idx, proto::NodeCondition* condition,
-    utils::RandomEngine* random);
+    SplitterPerThreadCache* cache, utils::RandomEngine* random);
 
 // Find the best possible condition for a uplift with categorical treatment,
 // a numerical feature and categorical outcome.
@@ -915,6 +986,19 @@ absl::Status GrowTreeBestFirstGlobal(
     SelectedExamplesRollingBuffer selected_examples,
     std::optional<SelectedExamplesRollingBuffer> leaf_examples);
 
+absl::Status GrowTreeLocal(
+    const dataset::VerticalDataset& train_dataset,
+    const model::proto::TrainingConfig& config,
+    const model::proto::TrainingConfigLinking& config_link,
+    const proto::DecisionTreeTrainingConfig& dt_config,
+    const model::proto::DeploymentConfig& deployment,
+    const std::vector<float>& weights, int32_t depth,
+    const InternalTrainConfig& internal_config,
+    const NodeConstraints& constraints, bool set_leaf_already_set,
+    NodeWithChildren* root, utils::RandomEngine* random, PerThreadCache* cache,
+    SelectedExamplesRollingBuffer selected_examples,
+    std::optional<SelectedExamplesRollingBuffer> leaf_examples);
+
 // The core training logic that is the same between single-threaded execution
 // and concurrent execution.
 //
@@ -948,20 +1032,6 @@ absl::Status DecisionTreeTrain(
     const InternalTrainConfig& internal_config = InternalTrainConfig());
 constexpr auto Train = DecisionTreeTrain;
 
-// Train a node and its children.
-absl::Status NodeTrain(
-    const dataset::VerticalDataset& train_dataset,
-    const model::proto::TrainingConfig& config,
-    const model::proto::TrainingConfigLinking& config_link,
-    const proto::DecisionTreeTrainingConfig& dt_config,
-    const model::proto::DeploymentConfig& deployment,
-    const std::vector<float>& weights, int32_t depth,
-    const InternalTrainConfig& internal_config,
-    const NodeConstraints& constraints, bool set_leaf_already_set,
-    NodeWithChildren* node, utils::RandomEngine* random, PerThreadCache* cache,
-    SelectedExamplesRollingBuffer selected_examples,
-    std::optional<SelectedExamplesRollingBuffer> leaf_examples);
-
 // Set the default values of the hyper-parameters.
 void SetDefaultHyperParameters(proto::DecisionTreeTrainingConfig* config);
 
@@ -991,50 +1061,14 @@ void SplitHonestExamples(
     std::vector<UnsignedExampleIdx>& leaf_examples,
     std::vector<UnsignedExampleIdx>& working_selected_examples);
 
-namespace internal {
-
-// Initializes the item mask i.e. the bitmap of the items to consider or to
-// ignore in the greedy selection for categorical-set attributes. An item is
-// masked if:
-//   1. It is "pure" i.e. the item is present in all or in none of the examples.
-//   2. The item has been sampled-out (see
-//   "categorical_set_split_greedy_sampling" in "dt_config").
-//   3. The item is pruned by the maximum number of items (see
-//   "categorical_set_split_max_num_items" in "dt_config").
-// Return true iif at least one item is non masked.
-bool MaskPureSampledOrPrunedItemsForCategoricalSetGreedySelection(
-    const proto::DecisionTreeTrainingConfig& dt_config,
-    int32_t num_attribute_classes,
-    absl::Span<const UnsignedExampleIdx> selected_examples,
-    const std::vector<int64_t>&
-        count_examples_without_weights_by_attribute_class,
-    std::vector<bool>* candidate_attributes_bitmap,
-    utils::RandomEngine* random);
-
-// Create the histogram bins (i.e. candidate threshold values) for an histogram
-// based split finding on a numerical attribute.
-absl::StatusOr<std::vector<float>> GenHistogramBins(
-    proto::NumericalSplit::Type type, int num_splits,
-    absl::Span<const float> attributes, float min_value, float max_value,
-    utils::RandomEngine* random);
-
-// Sets in "positive_examples" and "negative_examples" the examples from
-// "examples" that evaluate respectively positively and negatively to the
-// condition "condition". The items in "examples" are expected to be sorted.
-// When the function returns, "examples" might not be sorted anymore.
-// "positive_examples" and "negative_examples" will be pointing to subsets of
-// "examples".
-//
-// If "examples_are_training_examples=true", optimizes the allocation by
-// assuming "examples" are the examples used to train the tree.
-absl::StatusOr<ExampleSplitRollingBuffer> SplitExamplesInPlace(
-    const dataset::VerticalDataset& dataset,
-    SelectedExamplesRollingBuffer examples,
-    const proto::NodeCondition& condition, bool dataset_is_dense,
-    bool error_on_wrong_splitter_statistics,
-    bool examples_are_training_examples = true);
-
-}  // namespace internal
+// Evaluates the score of a condition Attribute >= threshold, where threshold
+// is given.
+absl::StatusOr<SplitStats> EvaluateGreaterThanSplitOnLabelRegression(
+    UnsignedExampleIdx num_examples, absl::Span<const float> attributes,
+    const std::vector<float>& labels, const std::vector<float>& weights,
+    const utils::NormalDistributionDouble& label_distribution,
+    UnsignedExampleIdx min_num_obs, float threshold,
+    SplitterPerThreadCache* cache);
 
 }  // namespace yggdrasil_decision_forests::model::decision_tree
 

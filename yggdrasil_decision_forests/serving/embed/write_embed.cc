@@ -43,9 +43,9 @@ ABSL_FLAG(std::string, options, "", "Options for the embedded model");
 ABSL_FLAG(bool, remove_output_filename, false,
           "If set, 'output' is a file path. The filename should be removed to "
           "get the real output directory.");
-ABSL_FLAG(std::string, language, "CC",
-          "Target language. Can be CC (i.e. C++, default) or JAVA. If set in "
-          "the options proto, this value is ignored.");
+ABSL_FLAG(
+    std::string, language, "Cpp",
+    "Target language. If set in the options proto, this value is ignored.");
 
 namespace yggdrasil_decision_forests::serving::embed {
 
@@ -73,13 +73,19 @@ absl::Status WriteEmbeddedModel() {
   }
 
   if (options.language_case() == proto::Options::LANGUAGE_NOT_SET) {
-    if (language_str == "CC") {
-      options.mutable_cc();
+    if (language_str == "Cpp") {
+      options.mutable_cpp();
+    } else if (language_str == "C") {
+      options.mutable_c();
     } else if (language_str == "Java") {
       options.mutable_java();
-    } else {
+    } else if (language_str == "CC") {
       return absl::InvalidArgumentError(absl::StrCat(
-          "Unknown language ", language_str, ". Available options: CC, Java"));
+          "Language identifier CC is deprecated, use Cpp instead"));
+    } else {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unknown language ", language_str,
+                       ". Available options: Cpp, C, Java"));
     }
   }
 

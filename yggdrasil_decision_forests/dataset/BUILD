@@ -328,6 +328,7 @@ cc_library_ydf(
         "//yggdrasil_decision_forests/utils:hash",
         "//yggdrasil_decision_forests/utils:logging",
         "//yggdrasil_decision_forests/utils:random",
+        "//yggdrasil_decision_forests/utils:status_macros",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -373,11 +374,11 @@ cc_library_ydf(
         "//yggdrasil_decision_forests/utils:filesystem",
         "//yggdrasil_decision_forests/utils:status_macros",
         "//yggdrasil_decision_forests/utils:zlib",
+        "@com_github_nlohmann_json//:json",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@nlohmann_json//:json",
     ],
 )
 

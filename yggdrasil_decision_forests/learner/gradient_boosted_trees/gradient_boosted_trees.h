@@ -44,8 +44,10 @@
 #define YGGDRASIL_DECISION_FORESTS_LEARNER_GRADIENT_BOOSTED_TREES_H_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -55,6 +57,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "yggdrasil_decision_forests/dataset/data_spec.pb.h"
+#include "yggdrasil_decision_forests/dataset/types.h"
 #include "yggdrasil_decision_forests/dataset/vertical_dataset.h"
 #include "yggdrasil_decision_forests/learner/abstract_learner.h"
 #include "yggdrasil_decision_forests/learner/abstract_learner.pb.h"
@@ -68,6 +71,7 @@
 #include "yggdrasil_decision_forests/model/decision_tree/decision_tree.h"
 #include "yggdrasil_decision_forests/model/gradient_boosted_trees/gradient_boosted_trees.h"
 #include "yggdrasil_decision_forests/model/gradient_boosted_trees/gradient_boosted_trees.pb.h"
+#include "yggdrasil_decision_forests/serving/fast_engine.h"
 #include "yggdrasil_decision_forests/utils/hyper_parameters.h"
 #include "yggdrasil_decision_forests/utils/random.h"
 
@@ -100,6 +104,8 @@ class GradientBoostedTreesLearner : public AbstractLearner {
   static constexpr char kHParamAdaptSubsampleForMaximumTrainingDuration[] =
       "adapt_subsample_for_maximum_training_duration";
   static constexpr char kHParamUseHessianGain[] = "use_hessian_gain";
+  static constexpr char kHParamMinSumHessianInLeaf[] =
+      "min_sum_hessian_in_leaf";
   static constexpr char kHParamSamplingMethod[] = "sampling_method";
   static constexpr char kSamplingMethodNone[] = "NONE";
   static constexpr char kSamplingMethodRandom[] = "RANDOM";
@@ -137,6 +143,8 @@ class GradientBoostedTreesLearner : public AbstractLearner {
   static constexpr char kHParamXENDCGTruncation[] =
       "cross_entropy_ndcg_truncation";
   static constexpr char kHParamTotalMaxNumNodes[] = "total_max_num_nodes";
+  static constexpr char kHParamMultinomialInitializeClassPriors[] =
+      "multinomial_initial_class_priors";
 
   absl::StatusOr<std::unique_ptr<AbstractModel>> TrainWithStatusImpl(
       const dataset::VerticalDataset& train_dataset,
@@ -155,6 +163,10 @@ class GradientBoostedTreesLearner : public AbstractLearner {
       const model::proto::TrainingConfigLinking& config_link,
       const proto::GradientBoostedTreesTrainingConfig& gbt_config,
       const model::proto::DeploymentConfig& deployment);
+
+  // Detects configuration errors and warnings for custom metrics.
+  static absl::Status CheckCustomMetric(const CustomMetric& custom_metric,
+                                        model::proto::Task task);
 
   static proto::LossConfiguration BuildLossConfiguration(
       const proto::GradientBoostedTreesTrainingConfig& gbt_config);
@@ -178,6 +190,7 @@ class GradientBoostedTreesLearner : public AbstractLearner {
     capabilities.set_support_validation_dataset(true);
     capabilities.set_support_monotonic_constraints(true);
     capabilities.set_support_custom_loss(true);
+    capabilities.set_support_custom_metrics(true);
     return capabilities;
   }
 
@@ -196,6 +209,13 @@ class GradientBoostedTreesLearner : public AbstractLearner {
     return custom_loss_functions_.index() > 0;
   }
 
+  // Sets the custom evaluation metrics.
+  void SetCustomMetrics(const std::vector<CustomMetric>& custom_metrics) {
+    custom_metrics_ = custom_metrics;
+  }
+
+  bool HasCustomMetrics() const { return !custom_metrics_.empty(); }
+
  private:
   // Initializes and returns a model.
   std::unique_ptr<GradientBoostedTreesModel> InitializeModel(
@@ -209,6 +229,7 @@ class GradientBoostedTreesLearner : public AbstractLearner {
       const std::optional<std::string>& typed_valid_path) const;
 
   CustomLossFunctions custom_loss_functions_;
+  std::vector<CustomMetric> custom_metrics_;
 };
 
 REGISTER_AbstractLearner(GradientBoostedTreesLearner,

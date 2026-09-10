@@ -196,7 +196,8 @@ void init_model(py::module_& m) {
       .def_readonly("validation_evaluation",
                     &GBTCCTrainingLogEntry::validation_evaluation)
       .def_readonly("training_evaluation",
-                    &GBTCCTrainingLogEntry::training_evaluation);
+                    &GBTCCTrainingLogEntry::training_evaluation)
+      .def_readonly("time", &GBTCCTrainingLogEntry::time);
 
   py::class_<DecisionForestCCModel,
              /*parent class*/ GenericCCModel>(m, "DecisionForestCCModel")
@@ -268,12 +269,18 @@ void init_model(py::module_& m) {
            &GradientBoostedTreesCCModel::initial_predictions)
       .def("set_initial_predictions",
            &GradientBoostedTreesCCModel::set_initial_predictions)
+      .def("output_logits",
+           WithStatusOr(&GradientBoostedTreesCCModel::output_logits))
+      .def("set_output_logits",
+           WithStatus(&GradientBoostedTreesCCModel::set_output_logits))
       .def("validation_evaluation",
            &GradientBoostedTreesCCModel::validation_evaluation)
       .def("training_logs", &GradientBoostedTreesCCModel::training_logs)
       .def("loss", &GradientBoostedTreesCCModel::loss)
       .def("num_trees_per_iter",
            &GradientBoostedTreesCCModel::num_trees_per_iter)
+      .def("early_stopping_triggered",
+           &GradientBoostedTreesCCModel::early_stopping_triggered)
       .def_property_readonly_static(
           "kRegisteredName", [](py::object /* self */) {
             return model::gradient_boosted_trees::GradientBoostedTreesModel::

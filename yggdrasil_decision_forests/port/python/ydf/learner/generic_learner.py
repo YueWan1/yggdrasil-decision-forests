@@ -20,8 +20,6 @@ import datetime
 import re
 from typing import Dict, List, Optional, Sequence, Set, Union
 
-from absl import logging
-
 from yggdrasil_decision_forests.dataset import data_spec_pb2
 from yggdrasil_decision_forests.dataset import weight_pb2
 from yggdrasil_decision_forests.learner import abstract_learner_pb2
@@ -32,6 +30,7 @@ from ydf.dataset import dataset
 from ydf.dataset import dataspec
 from ydf.learner import abstract_feature_selector as abstract_feature_selector_lib
 from ydf.learner import custom_loss
+from ydf.learner import custom_metric
 from ydf.learner import hyperparameters as hp_lib
 from ydf.learner import tuner as tuner_lib
 from ydf.metric import metric
@@ -69,6 +68,7 @@ class GenericLearner(abc.ABC):
           abstract_feature_selector_lib.AbstractFeatureSelector
       ],
       extra_training_config: Optional[abstract_learner_pb2.TrainingConfig],
+      custom_metrics: Optional[List[custom_metric.AbstractCustomMetric]],
   ):
     # TODO: Refactor to a single hyperparameter dictionary with edit
     # access to these options.
@@ -87,6 +87,7 @@ class GenericLearner(abc.ABC):
     self._feature_selector = feature_selector
     self._explicit_learner_arguments = explicit_learner_arguments
     self._extra_training_config = extra_training_config
+    self._custom_metrics = custom_metrics
 
     if self._label is not None and not isinstance(label, str):
       raise ValueError("The 'label' should be a string")
@@ -118,13 +119,14 @@ class GenericLearner(abc.ABC):
     if weights is not None and class_weights is not None:
       raise ValueError("Cannot specify both `weights` and `class_weights`.")
     if data_spec is not None:
-      logging.info(
+      log.info(
           "Data spec was provided explicitly, so any other dataspec"
           " configuration options will be ignored."
       )
     if tuner:
-      tuner.set_base_learner(learner_name)
-      tuner.set_base_learner_num_threads(self._deployment_config.num_threads)
+      tuner._set_base_learner(learner_name)  # pylint:disable=protected-access
+      tuner._set_base_learner_num_threads(self._deployment_config.num_threads)  # pylint:disable=protected-access
+      tuner._set_task(self._task)  # pylint:disable=protected-access
 
     self._post_init()
 
@@ -365,7 +367,7 @@ class GenericLearner(abc.ABC):
 Learner: {self._learner_name}
 Task: {self._task}
 Class: ydf.{self.__class__.__name__}
-Hyper-parameters: ydf.{self._hyperparameters}
+Hyper-parameters: {self._hyperparameters}
 """
 
   def __repr__(self) -> str:
@@ -392,10 +394,13 @@ Hyper-parameters: ydf.{self._hyperparameters}
     ) -> Optional[dataspec.Column]:
       if task in [Task.CLASSIFICATION, Task.CATEGORICAL_UPLIFT]:
         return dataspec.Column(
-            name=name,
+            name=name,  # pyrefly: ignore[bad-argument-type]
             semantic=dataspec.Semantic.CATEGORICAL,
             max_vocab_count=-1,
             min_vocab_frequency=1,
+            vocabulary=self._data_spec_args.label_classes,
+            vocabulary_must_be_complete=self._data_spec_args.label_classes
+            is not None,
         )
       elif task in [
           Task.REGRESSION,
@@ -403,7 +408,7 @@ Hyper-parameters: ydf.{self._hyperparameters}
           Task.NUMERICAL_UPLIFT,
           Task.SURVIVAL_ANALYSIS,
       ]:
-        return dataspec.Column(name=name, semantic=dataspec.Semantic.NUMERICAL)
+        return dataspec.Column(name=name, semantic=dataspec.Semantic.NUMERICAL)  # pyrefly: ignore[bad-argument-type]
       elif task in [Task.ANOMALY_DETECTION]:
         if name is None:
           # No label column
@@ -428,7 +433,7 @@ Hyper-parameters: ydf.{self._hyperparameters}
       data_spec_args.include_all_columns = True
       data_spec_args.columns = []
     column_defs = data_spec_args.columns
-    if dataspec.column_defs_contains_column(self._label, column_defs):
+    if dataspec.column_defs_contains_column(self._label, column_defs):  # pyrefly: ignore[bad-argument-type]
       raise ValueError(
           f"Label column {self._label} is also an input feature. A column"
           " cannot be both a label and input feature."
@@ -438,7 +443,7 @@ Hyper-parameters: ydf.{self._hyperparameters}
     ) is not None:
       column_defs.append(label_column)
     if self._weights is not None:
-      if dataspec.column_defs_contains_column(self._weights, column_defs):
+      if dataspec.column_defs_contains_column(self._weights, column_defs):  # pyrefly: ignore[bad-argument-type]
         raise ValueError(
             f"Weights column {self._weights} is also an input feature. A column"
             " cannot be both a weights and input feature."
@@ -451,7 +456,7 @@ Hyper-parameters: ydf.{self._hyperparameters}
     if self._ranking_group is not None:
       assert self._task == Task.RANKING
 
-      if dataspec.column_defs_contains_column(self._ranking_group, column_defs):
+      if dataspec.column_defs_contains_column(self._ranking_group, column_defs):  # pyrefly: ignore[bad-argument-type]
         raise ValueError(
             f"Ranking group column {self._ranking_group} is also an input"
             " feature. A column cannot be both a ranking group and input"
@@ -466,7 +471,7 @@ Hyper-parameters: ydf.{self._hyperparameters}
       assert self._task in [Task.NUMERICAL_UPLIFT, Task.CATEGORICAL_UPLIFT]
 
       if dataspec.column_defs_contains_column(
-          self._uplift_treatment, column_defs
+          self._uplift_treatment, column_defs  # pyrefly: ignore[bad-argument-type]
       ):
         raise ValueError(
             "The uplift_treatment column should not be specified as a feature"
@@ -499,7 +504,7 @@ class GenericCCLearner(GenericLearner):
       verbose: Optional[Union[int, bool]],
   ) -> generic_model.ModelType:
     if isinstance(ds, str):
-      return self._train_from_path(ds, valid)
+      return self._train_from_path(ds, valid)  # pyrefly: ignore[bad-argument-type]
     else:
       return self._train_from_dataset(ds, valid)
 
@@ -542,6 +547,8 @@ class GenericCCLearner(GenericLearner):
           distributed=True,
           discretize_numerical_columns=self._data_spec_args.discretize_numerical_columns,
       )
+      if self._tuner:
+        self._tuner._validate_data_spec(self._label, model.data_spec(), raise_error=False)  # pylint:disable=protected-access  # pyrefly: ignore[bad-argument-type]
       return model
 
   def _train_from_dataset(
@@ -555,6 +562,8 @@ class GenericCCLearner(GenericLearner):
       train_ds = self._get_vertical_dataset(ds)._dataset  # pylint: disable=protected-access
 
       dataspec.print_common_dataspec_issues_for_training(train_ds.data_spec())
+      if self._tuner:
+        self._tuner._validate_data_spec(self._label, train_ds.data_spec(), raise_error=True)  # pylint:disable=protected-access  # pyrefly: ignore[bad-argument-type]
 
       train_args = {"dataset": train_ds}
 
@@ -654,6 +663,14 @@ class GenericCCLearner(GenericLearner):
       else:
         self._hyperparameters["apply_link_function"] = True
 
+    cc_custom_metrics = []
+    if self._custom_metrics:
+      for py_custom_metric in self._custom_metrics:
+
+        if isinstance(py_custom_metric, custom_metric.AbstractCustomMetric):
+          py_custom_metric.check_is_compatible_task(training_config.task)
+          cc_custom_metrics.append(py_custom_metric._to_cc())  # pylint: disable=protected-access
+
     hp_proto = hp_lib.dict_to_generic_hyperparameter(self._hyperparameters)
     return ydf.GetLearner(
         training_config,
@@ -661,6 +678,7 @@ class GenericCCLearner(GenericLearner):
         hp_proto,
         self._deployment_config,
         cc_custom_loss,
+        cc_custom_metrics,
     )
 
   def _get_vertical_dataset(
@@ -713,7 +731,7 @@ class GenericCCLearner(GenericLearner):
         if effective_data_spec_args is not None:
           required_columns = [
               col.name
-              for col in effective_data_spec_args.columns
+              for col in effective_data_spec_args.columns  # pyrefly: ignore[not-iterable]
               if col is not None and col.name != self._label
           ]
       return dataset.create_vertical_dataset_with_spec_or_args(
@@ -737,6 +755,14 @@ class GenericCCLearner(GenericLearner):
             num_folds=folds,
         )
     )
+    if self._task == Task.RANKING:
+      if self._ranking_group is None:
+        raise ValueError(
+            "The ranking_group must be provided for RANKING tasks."
+        )
+      fold_generator.cross_validation.fold_group.group_attribute = (
+          self._ranking_group
+      )
 
     if isinstance(bootstrapping, bool):
       bootstrapping_samples = 2000 if bootstrapping else -1
@@ -744,9 +770,8 @@ class GenericCCLearner(GenericLearner):
       bootstrapping_samples = bootstrapping
     else:
       raise ValueError(
-          "bootstrapping argument should be boolean or an integer greater than"
-          " 100 as bootstrapping will not yield useful results. Got"
-          f" {bootstrapping!r} instead"
+          "Bootstrapping should be at least 100 or a boolean. Got"
+          f" {bootstrapping!r} instead."
       )
     evaluation_options = metric_pb2.EvaluationOptions(
         bootstrapping_samples=bootstrapping_samples,
@@ -810,7 +835,7 @@ class GenericCCLearner(GenericLearner):
       resume_training_snapshot_interval_seconds: Optional[int] = None,
       working_dir: Optional[str] = None,
       workers: Optional[Sequence[str]] = None,
-  ):
+  ) -> abstract_learner_pb2.DeploymentConfig:
     """Merges constructor arguments into a deployment configuration."""
 
     if num_threads is None:

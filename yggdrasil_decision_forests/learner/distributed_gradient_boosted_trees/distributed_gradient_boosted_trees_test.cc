@@ -27,6 +27,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_replace.h"
 #include "absl/strings/substitute.h"
 #include "yggdrasil_decision_forests/dataset/data_spec.h"
 #include "yggdrasil_decision_forests/dataset/data_spec.pb.h"
@@ -152,6 +153,24 @@ TEST_F(DatasetAdult, BaseWithFailure) {
   EXPECT_NEAR(metric::LogLoss(evaluation_), 0.2765, 0.04);
 }
 
+TEST_F(DatasetAdult, CheckpointFailureTrigger) {
+#if (defined(ADDRESS_SANITIZER) || defined(THREAD_SANITIZER) || \
+     defined(MEMORY_SANITIZER))
+  GTEST_SKIP() << "Skipping death tests in sanitized builds";
+#endif
+  SetNumWorkers(10);
+  auto* spe_config = train_config_.MutableExtension(
+      distributed_gradient_boosted_trees::proto::
+          distributed_gradient_boosted_trees_config);
+  spe_config->mutable_gbt()->set_num_trees(30);
+  spe_config->mutable_internal()->set_simulate_worker_failure(true);
+  spe_config->set_checkpoint_interval_trees(5);
+  TrainAndEvaluateModel();
+  // Note: This result does not take early stopping into account.
+  EXPECT_NEAR(metric::Accuracy(evaluation_), 0.8748, 0.01);
+  EXPECT_NEAR(metric::LogLoss(evaluation_), 0.2765, 0.04);
+}
+
 // Train and test a model on the adult dataset with workers continuously
 // failing and requiring checkpoint restoration for both the training and
 // validation workers.
@@ -224,7 +243,7 @@ TEST_F(DatasetAdult, ManualValidation) {
 
   // Note: With early stopping, the non-distributed implementation of GBT has a
   // validation loss of 0.57404.
-  EXPECT_NEAR(gbt_model->validation_loss(), 0.5859, 0.04);
+  EXPECT_NEAR(gbt_model->validation_loss(), 0.2890, 0.02);
   // (currently) There is not any early stopping.
   EXPECT_EQ(gbt_model->training_logs().number_of_trees_in_final_model(), 300);
   // (currently) There is one evaluation for each iteration.
@@ -295,7 +314,14 @@ TEST_F(DatasetAdult, CompareWithClassicalAlgorithm) {
   distributed_gbt_model->mutable_training_logs()->Clear();
   const auto description_distributed = model_->DescriptionAndStatistics(true);
 
-  EXPECT_EQ(description_classical, description_distributed);
+  // Remove the early stopping information from the description as early
+  // stopping is not implemented in the distributed algorithm.
+  const std::string clean_description_classical = absl::StrReplaceAll(
+      description_classical, {{"Early stopping triggered: false\n", ""}});
+  const std::string clean_description_distributed = absl::StrReplaceAll(
+      description_distributed, {{"Early stopping triggered: NOT_SET\n", ""}});
+
+  EXPECT_EQ(clean_description_classical, clean_description_distributed);
 }
 
 // The load balancer continuously change the worker<->feature mapping.

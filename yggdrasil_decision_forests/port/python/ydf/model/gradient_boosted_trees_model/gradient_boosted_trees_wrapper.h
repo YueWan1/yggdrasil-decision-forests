@@ -19,6 +19,7 @@
 #include <pybind11/numpy.h>
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,7 @@ struct GBTCCTrainingLogEntry {
   int iteration;
   metric::proto::EvaluationResults validation_evaluation;
   metric::proto::EvaluationResults training_evaluation;
+  std::optional<float> time;
 };
 
 class GradientBoostedTreesCCModel : public DecisionForestCCModel {
@@ -76,12 +78,19 @@ class GradientBoostedTreesCCModel : public DecisionForestCCModel {
 
   void set_initial_predictions(const py::array_t<float>& values);
 
+  absl::StatusOr<bool> output_logits() const;
+
+  absl::Status set_output_logits(bool output_logits);
+
   ::yggdrasil_decision_forests::model::gradient_boosted_trees::proto::Loss
   loss() const {
     return gbt_model_->loss();
   }
 
   int num_trees_per_iter() const { return gbt_model_->num_trees_per_iter(); }
+  std::optional<bool> early_stopping_triggered() const {
+    return gbt_model_->early_stopping_triggered();
+  }
 
  private:
   // This is a non-owning pointer to the model held by `model_`.

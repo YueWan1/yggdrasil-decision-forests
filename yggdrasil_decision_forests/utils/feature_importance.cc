@@ -44,6 +44,7 @@
 #include "yggdrasil_decision_forests/metric/metric.pb.h"
 #include "yggdrasil_decision_forests/model/abstract_model.h"
 #include "yggdrasil_decision_forests/model/abstract_model.pb.h"
+#include "yggdrasil_decision_forests/serving/fast_engine.h"
 #include "yggdrasil_decision_forests/utils/concurrency.h"
 #include "yggdrasil_decision_forests/utils/random.h"
 #include "yggdrasil_decision_forests/utils/shap.h"
@@ -174,7 +175,7 @@ absl::Status ComputePermutationFeatureImportance(
           return absl::OkStatus();
         }
 
-        utils::concurrency::MutexLock lock(&data_mutex);
+        utils::concurrency::MutexLock lock(data_mutex);
         for (int metric_idx = 0; metric_idx < metrics.size(); metric_idx++) {
           const auto metric = metrics[metric_idx];
           ASSIGN_OR_RETURN(
@@ -193,7 +194,7 @@ absl::Status ComputePermutationFeatureImportance(
 
   const auto process = [&](const int feature_idx) {
     {
-      utils::concurrency::MutexLock lock(&status_mutex);
+      utils::concurrency::MutexLock lock(status_mutex);
       if (!status.ok()) {
         // One of the previous job has already fail. Skip all the remaining
         // jobs.
@@ -202,7 +203,7 @@ absl::Status ComputePermutationFeatureImportance(
     }
     auto sub_status = process_return_status(feature_idx);
     if (!sub_status.ok()) {
-      utils::concurrency::MutexLock lock(&status_mutex);
+      utils::concurrency::MutexLock lock(status_mutex);
       status.Update(sub_status);
     }
   };
@@ -255,8 +256,8 @@ absl::Status ComputePermutationFeatureImportance(
 
   // Setup the evaluation configuration.
   metric::proto::EvaluationOptions eval_options;
+  eval_options.set_num_threads(options.num_threads);
   eval_options.set_bootstrapping_samples(0);
-  metric::proto::EvaluationResults base_evaluation;
   int label_col_idx = model->label_col_idx();
   if (model->task() == model::proto::ANOMALY_DETECTION) {
     eval_options.set_task(model::proto::CLASSIFICATION);
@@ -264,43 +265,58 @@ absl::Status ComputePermutationFeatureImportance(
       return absl::InvalidArgumentError(
           "Feature importance for anomaly detection models requires a label.");
     }
-    ASSIGN_OR_RETURN(base_evaluation,
-                     model->EvaluateOverrideType(
-                         dataset, eval_options, model::proto::CLASSIFICATION,
-                         label_col_idx, /*override_group_col_idx=*/-1, &rng));
-
   } else {
     eval_options.set_task(model->task());
-    ASSIGN_OR_RETURN(base_evaluation,
-                     model->EvaluateWithStatus(dataset, eval_options, &rng));
   }
 
-  const auto permutation_evaluation = [&dataset, &eval_options, &rng,
-                                       &rng_mutex, model,
-                                       label_col_idx](const int feature_idx)
-      -> std::optional<metric::proto::EvaluationResults> {
+  auto engine_or = model->BuildFastEngine();
+  serving::FastEngine* engine = nullptr;
+  if (engine_or.ok()) {
+    engine = engine_or.value().get();
+  }
+
+  auto evaluate = [&](const dataset::VerticalDataset& ds,
+                      utils::RandomEngine* r) {
+    if (model->task() == model::proto::ANOMALY_DETECTION) {
+      if (engine) {
+        return model->EvaluateWithEngineOverrideType(
+            *engine, ds, eval_options, model::proto::CLASSIFICATION,
+            label_col_idx, /*override_group_col_idx=*/-1, r);
+      } else {
+        return model->EvaluateOverrideType(
+            ds, eval_options, model::proto::CLASSIFICATION, label_col_idx,
+            /*override_group_col_idx=*/-1, r);
+      }
+    } else {
+      if (engine) {
+        return model->EvaluateWithEngine(*engine, ds, eval_options, r);
+      } else {
+        return model->EvaluateWithStatus(ds, eval_options, r);
+      }
+    }
+  };
+
+  metric::proto::EvaluationResults base_evaluation;
+  ASSIGN_OR_RETURN(base_evaluation, evaluate(dataset, &rng));
+
+  const auto permutation_evaluation = [&dataset, &rng, &rng_mutex, model,
+                                       &evaluate](const int feature_idx)
+      -> absl::StatusOr<std::optional<metric::proto::EvaluationResults>> {
     const auto it_input_feature =
         std::find(model->input_features().begin(),
                   model->input_features().end(), feature_idx);
     if (it_input_feature == model->input_features().end()) {
-      return {};
+      return std::nullopt;
     }
     utils::RandomEngine sub_rng;
     {
-      utils::concurrency::MutexLock lock(&rng_mutex);
+      utils::concurrency::MutexLock lock(rng_mutex);
       sub_rng.seed(rng());
     }
     const auto perturbed_dataset =
         utils::ShuffleDatasetColumns(dataset, {feature_idx}, &sub_rng);
-    if (model->task() == model::proto::ANOMALY_DETECTION) {
-      return model
-          ->EvaluateOverrideType(perturbed_dataset, eval_options,
-                                 model::proto::CLASSIFICATION, label_col_idx,
-                                 /*override_group_col_idx=*/-1, &sub_rng)
-          .value();
-    } else {
-      return model->Evaluate(perturbed_dataset, eval_options, &sub_rng);
-    }
+
+    return evaluate(perturbed_dataset, &sub_rng);
   };
 
   return utils::ComputePermutationFeatureImportance(
@@ -407,7 +423,7 @@ absl::Status ComputeShapFeatureImportance(
     }
 
     // Sync shap values
-    concurrency::MutexLock l(&mutex);
+    concurrency::MutexLock l(mutex);
     for (size_t attribute_idx = 0; attribute_idx < cache->sum_abs_shapes.size();
          attribute_idx++) {
       sum_abs_shapes[attribute_idx] += cache->sum_abs_shapes[attribute_idx];

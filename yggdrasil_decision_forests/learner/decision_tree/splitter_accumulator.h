@@ -44,6 +44,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/attributes.h"
 #include "absl/base/optimization.h"
 #include "absl/types/span.h"
 #include "yggdrasil_decision_forests/dataset/data_spec.h"
@@ -52,7 +53,6 @@
 #include "yggdrasil_decision_forests/learner/decision_tree/decision_tree.pb.h"
 #include "yggdrasil_decision_forests/learner/decision_tree/utils.h"
 #include "yggdrasil_decision_forests/model/decision_tree/decision_tree.pb.h"
-#include "yggdrasil_decision_forests/utils/compatibility.h"
 #include "yggdrasil_decision_forests/utils/distribution.h"
 #include "yggdrasil_decision_forests/utils/logging.h"
 
@@ -69,62 +69,44 @@ namespace internal {
 // objects, hence the unused fields cannot be set to void. Empty structs would
 // occupy 1 byte for the unused field. Combining two fields into a struct is
 // therefore the most space-efficient alternative.
-struct BooleanValueAndWeight {
+struct Empty {};
+
+template <bool weighted>
+struct BooleanValue {
   bool value;
-  float weight;
+  [[no_unique_address]] std::conditional_t<weighted, float, Empty> weight;
 };
 
-struct BooleanValueOnly {
-  bool value;
-};
-
-struct IntegerValueAndWeight {
+template <bool weighted>
+struct IntegerValue {
   int value;
-  float weight;
+  [[no_unique_address]] std::conditional_t<weighted, float, Empty> weight;
 };
 
-struct IntegerValueOnly {
-  int value;
-};
-
-struct FloatValueAndWeight {
+template <bool weighted>
+struct FloatValue {
   float value;
-  float weight;
+  [[no_unique_address]] std::conditional_t<weighted, float, Empty> weight;
 };
 
-struct FloatValueOnly {
-  float value;
-};
-
-struct FloatGradientHessianAndWeight {
+template <bool weighted>
+struct FloatGradientHessian {
   float gradient;
   float hessian;
-  float weight;
+  [[no_unique_address]] std::conditional_t<weighted, float, Empty> weight;
 };
 
-struct FloatGradientHessianOnly {
-  float gradient;
-  float hessian;
-};
-
-struct FloatSumGradientHessianAndWeight {
+template <bool weighted>
+struct FloatSumGradientHessian {
   float sum_gradient;
   float sum_hessian;
-  float sum_weight;
+  [[no_unique_address]] std::conditional_t<weighted, float, Empty> sum_weight;
 };
 
-struct FloatSumGradientHessianOnly {
-  float sum_gradient;
-  float sum_hessian;
-};
-
-struct SumTruesAndWeights {
+template <bool weighted>
+struct SumTrues {
   double sum_trues;
-  double sum_weights;
-};
-
-struct SumTruesOnly {
-  double sum_trues;
+  [[no_unique_address]] std::conditional_t<weighted, double, Empty> sum_weights;
 };
 
 }  // namespace internal
@@ -727,25 +709,25 @@ struct LabelBinaryCategoricalScoreAccumulator {
   }
 
   void AddOne(const bool value, const float weights) {
-    static float table[] = {0.f, 1.f};
+    static constexpr float table[] = {0.f, 1.f};
     sum_trues += table[value] * weights;
     sum_weights += weights;
   }
 
   void AddOne(const bool value) {
-    static float table[] = {0.f, 1.f};
+    static constexpr float table[] = {0.f, 1.f};
     sum_trues += table[value];
     sum_weights += 1.;
   }
 
   void SubOne(const bool value, const float weights) {
-    static float table[] = {0.f, 1.f};
+    static constexpr float table[] = {0.f, 1.f};
     sum_trues -= table[value] * weights;
     sum_weights -= weights;
   }
 
   void SubOne(const bool value) {
-    static float table[] = {0.f, 1.f};
+    static constexpr float table[] = {0.f, 1.f};
     sum_trues -= table[value];
     sum_weights -= 1.;
   }
@@ -767,10 +749,16 @@ struct LabelBinaryCategoricalScoreAccumulator {
 struct LabelHessianNumericalScoreAccumulator {
   static constexpr bool kNormalizeByWeight = false;
 
-  // Minimum hessian value when computing hessian scores and leaf values.
+  // Minimum hessian value when computing hessian scores and leaf values (Newton
+  // step denominator clamping for numerical stability). Even if
+  // min_sum_hessian_in_leaf is set to 0 (allowing splits with smaller
+  // hessians), the hessian used in the Newton step denominator is clamped to
+  // this value.
   static constexpr double kMinHessianForNewtonStep = 0.001;
 
-  double Score() const {
+  static double ComputeScore(double sum_gradient, double sum_hessian,
+                             double hessian_l1, double hessian_l2,
+                             const NodeConstraints& constraints) {
     const double numerator = l1_threshold(sum_gradient, hessian_l1);
     const double denominator =
         std::max(sum_hessian, kMinHessianForNewtonStep) + hessian_l2;
@@ -780,14 +768,21 @@ struct LabelHessianNumericalScoreAccumulator {
       const auto constraint_min = constraints.min_max_output.value().min;
       const auto constraint_max = constraints.min_max_output.value().max;
       if (leaf < constraint_min) {
-        return std::abs(constraint_min * numerator) / denominator;
+        return 2.0 * constraint_min * numerator -
+               constraint_min * constraint_min * denominator;
       } else if (leaf > constraint_max) {
-        return std::abs(constraint_max * numerator) / denominator;
+        return 2.0 * constraint_max * numerator -
+               constraint_max * constraint_max * denominator;
       }
     }
 
     // grad^2 / hessian
     return numerator * numerator / denominator;
+  }
+
+  double Score() const {
+    return ComputeScore(sum_gradient, sum_hessian, hessian_l1, hessian_l2,
+                        constraints);
   }
 
   // Leaf value without any constraint applied.
@@ -892,9 +887,7 @@ struct LabelHessianNumericalScoreAccumulator {
 
 template <bool weighted>
 struct LabelNumericalOneValueBucket {
-  typedef typename std::conditional_t<weighted, internal::FloatValueAndWeight,
-                                      internal::FloatValueOnly>
-      ValueAndMaybeWeight;
+  using ValueAndMaybeWeight = internal::FloatValue<weighted>;
   ValueAndMaybeWeight content;
   static constexpr int count = 1;  // NOLINT
 
@@ -971,8 +964,9 @@ struct LabelNumericalOneValueBucket {
     }
 
     template <typename ExampleIdx>
-    void AddDirectToScoreAcc(const ExampleIdx example_idx,
-                             LabelNumericalScoreAccumulator* acc) const {
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void AddDirectToScoreAcc(
+        const ExampleIdx example_idx,
+        LabelNumericalScoreAccumulator* acc) const {
       if constexpr (weighted) {
         acc->label.Add(label_[example_idx], weights_[example_idx]);
       } else {
@@ -981,43 +975,36 @@ struct LabelNumericalOneValueBucket {
     }
 
     template <typename ExampleIdx>
-    void SubDirectToScoreAcc(const ExampleIdx example_idx,
-                             LabelNumericalScoreAccumulator* acc) const {
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void MoveDirectFromPosToNegScoreAcc(
+        const ExampleIdx example_idx, LabelNumericalScoreAccumulator* pos,
+        LabelNumericalScoreAccumulator* neg) const {
+      const float label_val = label_[example_idx];
       if constexpr (weighted) {
-        acc->label.Sub(label_[example_idx], weights_[example_idx]);
+        const float weight_val = weights_[example_idx];
+        pos->label.Sub(label_val, weight_val);
+        neg->label.Add(label_val, weight_val);
       } else {
-        acc->label.Sub(label_[example_idx]);
+        pos->label.Sub(label_val);
+        neg->label.Add(label_val);
       }
     }
 
     template <typename ExampleIdx>
-    void AddDirectToScoreAccWithDuplicates(
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void
+    MoveDirectFromPosToNegScoreAccWithDuplicates(
         const ExampleIdx example_idx, const int num_duplicates,
-        LabelNumericalScoreAccumulator* acc) const {
+        LabelNumericalScoreAccumulator* pos,
+        LabelNumericalScoreAccumulator* neg) const {
+      const float label_val = label_[example_idx];
       if constexpr (weighted) {
-        acc->label.Add(label_[example_idx],
-                       weights_[example_idx] * num_duplicates);
+        const float weight_val = weights_[example_idx] * num_duplicates;
+        pos->label.Sub(label_val, weight_val);
+        neg->label.Add(label_val, weight_val);
       } else {
-        acc->label.Add(label_[example_idx], static_cast<float>(num_duplicates));
+        const float weight_val = static_cast<float>(num_duplicates);
+        pos->label.Sub(label_val, weight_val);
+        neg->label.Add(label_val, weight_val);
       }
-    }
-
-    template <typename ExampleIdx>
-    void SubDirectToScoreAccWithDuplicates(
-        const ExampleIdx example_idx, const int num_duplicates,
-        LabelNumericalScoreAccumulator* acc) const {
-      if constexpr (weighted) {
-        acc->label.Sub(label_[example_idx],
-                       weights_[example_idx] * num_duplicates);
-      } else {
-        acc->label.Sub(label_[example_idx], static_cast<float>(num_duplicates));
-      }
-    }
-
-    template <typename ExampleIdx>
-    void Prefetch(const ExampleIdx example_idx) const {
-      PREFETCH(&label_[example_idx]);
-      if constexpr (weighted) PREFETCH(&weights_[example_idx]);
     }
 
    private:
@@ -1045,10 +1032,8 @@ inline std::ostream& operator<<(
 
 template <bool weighted>
 struct LabelHessianNumericalOneValueBucket {
-  typedef typename std::conditional_t<weighted,
-                                      internal::FloatGradientHessianAndWeight,
-                                      internal::FloatGradientHessianOnly>
-      GradientHessianAndMaybeWeight;
+  using GradientHessianAndMaybeWeight =
+      internal::FloatGradientHessian<weighted>;
   GradientHessianAndMaybeWeight content;
   static constexpr int count = 1;  // NOLINT
 
@@ -1072,7 +1057,7 @@ struct LabelHessianNumericalOneValueBucket {
    public:
     Initializer(const double sum_gradient, const double sum_hessian,
                 const double sum_weights, const double hessian_l1,
-                const double hessian_l2,
+                const double hessian_l2, const double min_sum_hessian_in_leaf,
                 const bool hessian_split_score_subtract_parent,
                 const int8_t monotonic_direction,
                 const NodeConstraints& constraints)
@@ -1081,11 +1066,12 @@ struct LabelHessianNumericalOneValueBucket {
           sum_weights_(sum_weights),
           hessian_l1_(hessian_l1),
           hessian_l2_(hessian_l2),
+          min_sum_hessian_in_leaf_(min_sum_hessian_in_leaf),
           monotonic_direction_(monotonic_direction),
           constraints_(constraints) {
-      const double sum_gradient_l1 = l1_threshold(sum_gradient, hessian_l1);
       const auto parent_score =
-          (sum_gradient_l1 * sum_gradient_l1) / (sum_hessian + hessian_l2);
+          LabelHessianNumericalScoreAccumulator::ComputeScore(
+              sum_gradient, sum_hessian, hessian_l1, hessian_l2, constraints);
       if (hessian_split_score_subtract_parent) {
         parent_score_ = parent_score;
         min_score_ = 0;
@@ -1113,6 +1099,11 @@ struct LabelHessianNumericalOneValueBucket {
 
     bool IsValidSplit(const LabelHessianNumericalScoreAccumulator& neg,
                       const LabelHessianNumericalScoreAccumulator& pos) const {
+      if (min_sum_hessian_in_leaf_ > 0 &&
+          (neg.sum_hessian < min_sum_hessian_in_leaf_ ||
+           pos.sum_hessian < min_sum_hessian_in_leaf_)) {
+        return false;
+      }
       if (monotonic_direction_ != 0) {
         const bool pos_is_greater =
             pos.LeafNoConstraints() >= neg.LeafNoConstraints();
@@ -1129,6 +1120,7 @@ struct LabelHessianNumericalOneValueBucket {
     const double sum_weights_;
     const double hessian_l1_;
     const double hessian_l2_;
+    const double min_sum_hessian_in_leaf_ = 0.0;
     double parent_score_;
     double min_score_;
 
@@ -1167,59 +1159,38 @@ struct LabelHessianNumericalOneValueBucket {
     }
 
     template <typename ExampleIdx>
-    void AddDirectToScoreAcc(const ExampleIdx example_idx,
-                             LabelHessianNumericalScoreAccumulator* acc) const {
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void MoveDirectFromPosToNegScoreAcc(
+        const ExampleIdx example_idx,
+        LabelHessianNumericalScoreAccumulator* pos,
+        LabelHessianNumericalScoreAccumulator* neg) const {
+      const float gradient_val = gradients_[example_idx];
+      const float hessian_val = hessians_[example_idx];
       if constexpr (weighted) {
-        acc->Add(gradients_[example_idx], hessians_[example_idx],
-                 weights_[example_idx]);
+        const float weight_val = weights_[example_idx];
+        pos->Sub(gradient_val, hessian_val, weight_val);
+        neg->Add(gradient_val, hessian_val, weight_val);
       } else {
-        acc->Add(gradients_[example_idx], hessians_[example_idx], 1.f);
+        pos->Sub(gradient_val, hessian_val, 1.f);
+        neg->Add(gradient_val, hessian_val, 1.f);
       }
     }
 
     template <typename ExampleIdx>
-    void SubDirectToScoreAcc(const ExampleIdx example_idx,
-                             LabelHessianNumericalScoreAccumulator* acc) const {
-      if constexpr (weighted) {
-        acc->Sub(gradients_[example_idx], hessians_[example_idx],
-                 weights_[example_idx]);
-      } else {
-        acc->Sub(gradients_[example_idx], hessians_[example_idx], 1.f);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void AddDirectToScoreAccWithDuplicates(
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void
+    MoveDirectFromPosToNegScoreAccWithDuplicates(
         const ExampleIdx example_idx, const int num_duplicates,
-        LabelHessianNumericalScoreAccumulator* acc) const {
+        LabelHessianNumericalScoreAccumulator* pos,
+        LabelHessianNumericalScoreAccumulator* neg) const {
+      const float gradient_val = gradients_[example_idx];
+      const float hessian_val = hessians_[example_idx];
       if constexpr (weighted) {
-        acc->Add(gradients_[example_idx], hessians_[example_idx],
-                 weights_[example_idx] * num_duplicates);
+        const float weight_val = weights_[example_idx] * num_duplicates;
+        pos->Sub(gradient_val, hessian_val, weight_val);
+        neg->Add(gradient_val, hessian_val, weight_val);
       } else {
-        acc->Add<float>(gradients_[example_idx], hessians_[example_idx],
-                        num_duplicates);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void SubDirectToScoreAccWithDuplicates(
-        const ExampleIdx example_idx, const int num_duplicates,
-        LabelHessianNumericalScoreAccumulator* acc) const {
-      if constexpr (weighted) {
-        acc->Sub(gradients_[example_idx], hessians_[example_idx],
-                 weights_[example_idx] * num_duplicates);
-      } else {
-        acc->Sub<float>(gradients_[example_idx], hessians_[example_idx],
-                        num_duplicates);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void Prefetch(const ExampleIdx example_idx) const {
-      PREFETCH(&gradients_[example_idx]);
-      PREFETCH(&hessians_[example_idx]);
-      if constexpr (weighted) {
-        PREFETCH(&weights_[example_idx]);
+        const float weight_val = static_cast<float>(num_duplicates);
+        pos->Sub(gradient_val, hessian_val, weight_val);
+        neg->Add(gradient_val, hessian_val, weight_val);
       }
     }
 
@@ -1247,9 +1218,7 @@ inline std::ostream& operator<<(
 
 template <bool weighted>
 struct LabelCategoricalOneValueBucket {
-  typedef typename std::conditional_t<weighted, internal::IntegerValueAndWeight,
-                                      internal::IntegerValueOnly>
-      ValueAndMaybeWeight;
+  using ValueAndMaybeWeight = internal::IntegerValue<weighted>;
   ValueAndMaybeWeight content;
 
   // Not called "kCount" because this is used as a template parameter and
@@ -1330,54 +1299,35 @@ struct LabelCategoricalOneValueBucket {
     }
 
     template <typename ExampleIdx>
-    void AddDirectToScoreAcc(const ExampleIdx example_idx,
-                             LabelCategoricalScoreAccumulator* acc) const {
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void MoveDirectFromPosToNegScoreAcc(
+        const ExampleIdx example_idx, LabelCategoricalScoreAccumulator* pos,
+        LabelCategoricalScoreAccumulator* neg) const {
+      const int label_val = label_[example_idx];
       if constexpr (weighted) {
-        acc->label.Add(label_[example_idx], weights_[example_idx]);
+        const float weight_val = weights_[example_idx];
+        pos->label.Sub(label_val, weight_val);
+        neg->label.Add(label_val, weight_val);
       } else {
-        acc->label.Add(label_[example_idx]);
+        pos->label.Sub(label_val);
+        neg->label.Add(label_val);
       }
     }
 
     template <typename ExampleIdx>
-    void SubDirectToScoreAcc(const ExampleIdx example_idx,
-                             LabelCategoricalScoreAccumulator* acc) const {
-      if constexpr (weighted) {
-        acc->label.Sub(label_[example_idx], weights_[example_idx]);
-      } else {
-        acc->label.Sub(label_[example_idx]);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void AddDirectToScoreAccWithDuplicates(
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void
+    MoveDirectFromPosToNegScoreAccWithDuplicates(
         const ExampleIdx example_idx, const int num_duplicates,
-        LabelCategoricalScoreAccumulator* acc) const {
+        LabelCategoricalScoreAccumulator* pos,
+        LabelCategoricalScoreAccumulator* neg) const {
+      const int label_val = label_[example_idx];
       if constexpr (weighted) {
-        acc->label.Add(label_[example_idx],
-                       weights_[example_idx] * num_duplicates);
+        const float weight_val = weights_[example_idx] * num_duplicates;
+        pos->label.Sub(label_val, weight_val);
+        neg->label.Add(label_val, weight_val);
       } else {
-        acc->label.Add(label_[example_idx], num_duplicates);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void SubDirectToScoreAccWithDuplicates(
-        const ExampleIdx example_idx, const int num_duplicates,
-        LabelCategoricalScoreAccumulator* acc) const {
-      if constexpr (weighted) {
-        acc->label.Sub(label_[example_idx],
-                       weights_[example_idx] * num_duplicates);
-      } else {
-        acc->label.Sub(label_[example_idx], num_duplicates);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void Prefetch(const ExampleIdx example_idx) const {
-      PREFETCH(&label_[example_idx]);
-      if constexpr (weighted) {
-        PREFETCH(&weights_[example_idx]);
+        const float weight_val = static_cast<float>(num_duplicates);
+        pos->label.Sub(label_val, weight_val);
+        neg->label.Add(label_val, weight_val);
       }
     }
 
@@ -1407,9 +1357,7 @@ inline std::ostream& operator<<(
 
 template <bool weighted>
 struct LabelBinaryCategoricalOneValueBucket {
-  typedef typename std::conditional_t<weighted, internal::BooleanValueAndWeight,
-                                      internal::BooleanValueOnly>
-      ValueAndMaybeWeight;
+  using ValueAndMaybeWeight = internal::BooleanValue<weighted>;
   ValueAndMaybeWeight content;
 
   // Not called "kCount" because this is used as a template parameter and
@@ -1497,56 +1445,36 @@ struct LabelBinaryCategoricalOneValueBucket {
     }
 
     template <typename ExampleIdx>
-    void AddDirectToScoreAcc(
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void MoveDirectFromPosToNegScoreAcc(
         const ExampleIdx example_idx,
-        LabelBinaryCategoricalScoreAccumulator* acc) const {
+        LabelBinaryCategoricalScoreAccumulator* pos,
+        LabelBinaryCategoricalScoreAccumulator* neg) const {
+      const bool label_val = label_[example_idx] == 2;
       if constexpr (weighted) {
-        acc->AddOne(label_[example_idx] == 2, weights_[example_idx]);
+        const float weight_val = weights_[example_idx];
+        pos->SubOne(label_val, weight_val);
+        neg->AddOne(label_val, weight_val);
       } else {
-        acc->AddOne(label_[example_idx] == 2);
+        pos->SubOne(label_val);
+        neg->AddOne(label_val);
       }
     }
 
     template <typename ExampleIdx>
-    void SubDirectToScoreAcc(
-        const ExampleIdx example_idx,
-        LabelBinaryCategoricalScoreAccumulator* acc) const {
-      if constexpr (weighted) {
-        acc->SubOne(label_[example_idx] == 2, weights_[example_idx]);
-      } else {
-        acc->SubOne(label_[example_idx] == 2);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void AddDirectToScoreAccWithDuplicates(
+    ABSL_ATTRIBUTE_ALWAYS_INLINE void
+    MoveDirectFromPosToNegScoreAccWithDuplicates(
         const ExampleIdx example_idx, const int num_duplicates,
-        LabelBinaryCategoricalScoreAccumulator* acc) const {
+        LabelBinaryCategoricalScoreAccumulator* pos,
+        LabelBinaryCategoricalScoreAccumulator* neg) const {
+      const bool label_val = label_[example_idx] == 2;
       if constexpr (weighted) {
-        acc->AddOne(label_[example_idx] == 2,
-                    weights_[example_idx] * num_duplicates);
+        const float weight_val = weights_[example_idx] * num_duplicates;
+        pos->SubOne(label_val, weight_val);
+        neg->AddOne(label_val, weight_val);
       } else {
-        acc->AddOne(label_[example_idx] == 2, num_duplicates);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void SubDirectToScoreAccWithDuplicates(
-        const ExampleIdx example_idx, const int num_duplicates,
-        LabelBinaryCategoricalScoreAccumulator* acc) const {
-      if constexpr (weighted) {
-        acc->SubOne(label_[example_idx] == 2,
-                    weights_[example_idx] * num_duplicates);
-      } else {
-        acc->SubOne(label_[example_idx] == 2, num_duplicates);
-      }
-    }
-
-    template <typename ExampleIdx>
-    void Prefetch(const ExampleIdx example_idx) const {
-      PREFETCH(&label_[example_idx]);
-      if constexpr (weighted) {
-        PREFETCH(&weights_[example_idx]);
+        const float weight_val = static_cast<float>(num_duplicates);
+        pos->SubOne(label_val, weight_val);
+        neg->AddOne(label_val, weight_val);
       }
     }
 
@@ -1770,11 +1698,8 @@ struct LabelHessianNumericalBucket {
   // bucket of size 4 bytes.
   float priority;
 
-  typedef
-      typename std::conditional_t<weighted,
-                                  internal::FloatSumGradientHessianAndWeight,
-                                  internal::FloatSumGradientHessianOnly>
-          SumGradientHessianAndMaybeWeights;
+  using SumGradientHessianAndMaybeWeights =
+      internal::FloatSumGradientHessian<weighted>;
   SumGradientHessianAndMaybeWeights content;
   int64_t count;
 
@@ -1782,7 +1707,8 @@ struct LabelHessianNumericalBucket {
     if constexpr (weighted) {
       acc->Add(content.sum_gradient, content.sum_hessian, content.sum_weight);
     } else {
-      acc->Add(content.sum_gradient, content.sum_hessian, 1.f);
+      acc->Add(content.sum_gradient, content.sum_hessian,
+               static_cast<float>(count));
     }
   }
 
@@ -1790,7 +1716,8 @@ struct LabelHessianNumericalBucket {
     if constexpr (weighted) {
       acc->Sub(content.sum_gradient, content.sum_hessian, content.sum_weight);
     } else {
-      acc->Sub(content.sum_gradient, content.sum_hessian, 1.f);
+      acc->Sub(content.sum_gradient, content.sum_hessian,
+               static_cast<float>(count));
     }
   }
 
@@ -1802,7 +1729,7 @@ struct LabelHessianNumericalBucket {
    public:
     Initializer(const double sum_gradient, const double sum_hessian,
                 const double sum_weights, const double hessian_l1,
-                const double hessian_l2,
+                const double hessian_l2, const double min_sum_hessian_in_leaf,
                 const bool hessian_split_score_subtract_parent,
                 const int8_t monotonic_direction,
                 const NodeConstraints& constraints)
@@ -1811,11 +1738,12 @@ struct LabelHessianNumericalBucket {
           sum_weights_(sum_weights),
           hessian_l1_(hessian_l1),
           hessian_l2_(hessian_l2),
+          min_sum_hessian_in_leaf_(min_sum_hessian_in_leaf),
           monotonic_direction_(monotonic_direction),
           constraints_(constraints) {
-      const double sum_gradient_l1 = l1_threshold(sum_gradient, hessian_l1);
       const auto parent_score =
-          (sum_gradient_l1 * sum_gradient_l1) / (sum_hessian + hessian_l2);
+          LabelHessianNumericalScoreAccumulator::ComputeScore(
+              sum_gradient, sum_hessian, hessian_l1, hessian_l2, constraints);
       if (hessian_split_score_subtract_parent) {
         parent_score_ = parent_score;
         min_score_ = 0;
@@ -1843,6 +1771,11 @@ struct LabelHessianNumericalBucket {
 
     bool IsValidSplit(const LabelHessianNumericalScoreAccumulator& neg,
                       const LabelHessianNumericalScoreAccumulator& pos) const {
+      if (min_sum_hessian_in_leaf_ > 0 &&
+          (neg.sum_hessian < min_sum_hessian_in_leaf_ ||
+           pos.sum_hessian < min_sum_hessian_in_leaf_)) {
+        return false;
+      }
       if (monotonic_direction_ != 0) {
         const bool pos_is_greater =
             pos.LeafNoConstraints() >= neg.LeafNoConstraints();
@@ -1859,6 +1792,7 @@ struct LabelHessianNumericalBucket {
     const double sum_weights_;
     const double hessian_l1_;
     const double hessian_l2_;
+    const double min_sum_hessian_in_leaf_ = 0.0;
     double parent_score_;
     double min_score_;
 
@@ -1899,8 +1833,11 @@ struct LabelHessianNumericalBucket {
 
     void Finalize(LabelHessianNumericalBucket* acc) const {
       if (acc->content.sum_hessian > 0) {
+        const double clamped_hessian = std::max(
+            static_cast<double>(acc->content.sum_hessian),
+            LabelHessianNumericalScoreAccumulator::kMinHessianForNewtonStep);
         acc->priority = l1_threshold(acc->content.sum_gradient, hessian_l1_) /
-                        (acc->content.sum_hessian + hessian_l2_);
+                        (clamped_hessian + hessian_l2_);
       } else {
         acc->priority = 0.;
       }
@@ -2070,9 +2007,7 @@ inline std::ostream& operator<<(std::ostream& os,
 
 template <bool weighted>
 struct LabelBinaryCategoricalBucket {
-  typedef typename std::conditional_t<weighted, internal::SumTruesAndWeights,
-                                      internal::SumTruesOnly>
-      SumTruesAndMaybeWeights;
+  using SumTruesAndMaybeWeights = internal::SumTrues<weighted>;
   SumTruesAndMaybeWeights content;
   int64_t count;
 
@@ -2174,7 +2109,7 @@ struct LabelBinaryCategoricalBucket {
 
     void ConsumeExample(const UnsignedExampleIdx example_idx,
                         LabelBinaryCategoricalBucket* bucket) const {
-      static float table[] = {0.f, 1.f};
+      static constexpr float table[] = {0.f, 1.f};
       bucket->count++;
       if constexpr (weighted) {
         bucket->content.sum_trues +=

@@ -17,7 +17,9 @@
 import os
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
+import pandas as pd
 
 from ydf.dataset import dataspec
 from ydf.learner import generic_learner
@@ -29,7 +31,7 @@ from ydf.utils import test_utils
 Column = dataspec.Column
 
 
-class CARTLearnerTest(learner_test_utils.LearnerTest):
+class CARTLearnerTest(learner_test_utils.LearnerTest, parameterized.TestCase):
 
   def test_adult(self):
     learner = specialized_learners.CartLearner(label="income")
@@ -37,7 +39,7 @@ class CARTLearnerTest(learner_test_utils.LearnerTest):
     model, _, _ = self._check_adult_model(
         learner=learner, minimum_accuracy=0.853
     )
-    self.assertGreater(model.self_evaluation().accuracy, 0.84)
+    self.assertGreater(model.self_evaluation().accuracy, 0.84)  # pyrefly: ignore[no-matching-overload]
 
   def test_adult_with_validation(self):
     learner = specialized_learners.CartLearner(label="income")
@@ -51,6 +53,43 @@ class CARTLearnerTest(learner_test_utils.LearnerTest):
         model.self_evaluation().num_examples,
         self.adult.test_pd.shape[0],
     )
+
+  def test_adult_integerized(self):
+    def map_col_to_int(df1, df2, name: str):
+      c = df1[name].astype("category")
+      d = dict(zip(c.cat.categories, range(1, len(c.cat.categories) + 1)))
+      d[np.nan] = -1
+      df1[name] = df1[name].map(d).astype(int)
+      df2[name] = df2[name].map(d).astype(int)
+
+    adult_integerized_train = self.adult.train_pd.copy(deep=True)
+    adult_integerized_test = self.adult.test_pd.copy(deep=True)
+
+    categorical_features = [
+        "workclass",
+        "education",
+        "marital_status",
+        "occupation",
+        "relationship",
+        "race",
+        "sex",
+        "native_country",
+    ]
+    for c in categorical_features:
+      map_col_to_int(adult_integerized_train, adult_integerized_test, c)
+
+    column_defs = [
+        Column(c, dataspec.Semantic.CATEGORICAL, is_already_integerized=True)
+        for c in categorical_features
+    ]
+
+    learner = specialized_learners.CartLearner(
+        label="income", include_all_columns=True, features=column_defs
+    )
+
+    model = learner.train(adult_integerized_train)
+    evaluation = model.evaluate(adult_integerized_test)
+    self.assertGreaterEqual(evaluation.accuracy, 0.86)
 
   def test_two_center_regression(self):
     learner = specialized_learners.CartLearner(
@@ -314,6 +353,126 @@ class CARTLearnerTest(learner_test_utils.LearnerTest):
     model = specialized_learners.CartLearner(label="my_label").train(ds)
     self.assertEqual(model.label_col_idx(), 0)
     self.assertEqual(model.label(), "my_label")
+
+  @parameterized.named_parameters(
+      ("in_memory", False),
+      ("path", True),
+  )
+  def test_label_classes_correct(self, use_path):
+    custom_label_classes = [
+        "Married-AF-spouse",
+        "Separated",
+        "Married-spouse-absent",
+        "Never-married",
+        "Widowed",
+        "Married-civ-spouse",
+        "Divorced",
+    ]
+    train_ds = self.adult.train_path if use_path else self.adult.train_pd
+    model = specialized_learners.CartLearner(
+        label="marital_status", label_classes=custom_label_classes
+    ).train(train_ds)
+    self.assertEqual(model.label_classes(), custom_label_classes)
+
+  @parameterized.named_parameters(
+      ("in_memory", False),
+      ("path", True),
+  )
+  def test_label_classes_superset(self, use_path):
+    custom_label_classes = [
+        "Married-AF-spouse",
+        "Separated",
+        "Married-spouse-absent",
+        "Never-married",
+        "Widowed",
+        "Married-civ-spouse",
+        "Divorced",
+        "Extra-class",
+    ]
+    train_ds = self.adult.train_path if use_path else self.adult.train_pd
+    model = specialized_learners.CartLearner(
+        label="marital_status", label_classes=custom_label_classes
+    ).train(train_ds)
+    self.assertEqual(model.label_classes(), custom_label_classes)
+
+  @parameterized.named_parameters(
+      ("in_memory", False),
+      ("path", True),
+  )
+  def test_label_classes_missing(self, use_path):
+    custom_label_classes = [
+        "Married-AF-spouse",
+        "Separated",
+        "Married-spouse-absent",
+        "Never-married",
+        "Widowed",
+        "Married-civ-spouse",
+        # "Divorced" is missing
+    ]
+    train_ds = self.adult.train_path if use_path else self.adult.train_pd
+    if use_path:
+      expected_error = (
+          'The provided vocabulary for column "marital_status" is incomplete.'
+          " The following values are present in the data but missing from the"
+          " vocabulary: Divorced"
+      )
+    else:
+      expected_error = (
+          "The provided `label_classes` argument does not contain all the"
+          " unique values present in the label column"
+      )
+    with self.assertRaisesRegex(ValueError, expected_error):
+      specialized_learners.CartLearner(
+          label="marital_status", label_classes=custom_label_classes
+      ).train(train_ds)
+
+  @parameterized.named_parameters(
+      ("in_memory", False),
+      ("path", True),
+  )
+  def test_label_classes_duplicate(self, use_path):
+    custom_label_classes = [
+        "Married-AF-spouse",
+        "Separated",
+        "Married-spouse-absent",
+        "Never-married",
+        "Widowed",
+        "Married-civ-spouse",
+        "Divorced",
+        "Divorced",
+    ]
+    train_ds = self.adult.train_path if use_path else self.adult.train_pd
+    with self.assertRaisesRegex(
+        ValueError,
+        "The forced vocabulary argument contains duplicate values",
+    ):
+      specialized_learners.CartLearner(
+          label="marital_status", label_classes=custom_label_classes
+      ).train(train_ds)
+
+  @parameterized.named_parameters(
+      ("in_memory", False),
+      ("path", True),
+  )
+  def test_label_classes_integers(self, use_path):
+    ds = {
+        "f": np.array([1, 2, 3, 4, 5, 6], dtype=float),
+        "label": np.array([1, 1, 2, 2, 2, 3]),
+    }
+    if use_path:
+      path = self.create_tempfile().full_path
+      pd.DataFrame(ds).to_csv(path, index=False)
+      train_ds = "csv:" + path
+    else:
+      train_ds = ds
+
+    custom_label_classes = [1, 2, 3, 4]
+    model = specialized_learners.CartLearner(
+        label="label",
+        task=generic_learner.Task.CLASSIFICATION,
+        label_classes=custom_label_classes,
+    ).train(train_ds)
+    self.assertEqual(model.label_classes(), ["1", "2", "3", "4"])
 
 
 if __name__ == "__main__":

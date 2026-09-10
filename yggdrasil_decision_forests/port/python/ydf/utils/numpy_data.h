@@ -22,11 +22,12 @@
 #include <pybind11/stl.h>
 
 #include <cstddef>
-#include <string>
+#include <cstring>
 #include <string_view>
 #include <vector>
 
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "yggdrasil_decision_forests/utils/logging.h"
 
 namespace py = ::pybind11;
@@ -93,6 +94,15 @@ struct NPByteArray {
   const size_t _itemsize;
   const size_t _size;
 };
+
+template <typename T>
+py::array_t<T> SpanToSafeCopy(absl::Span<const T> span) {
+  py::array_t<T> arr({static_cast<py::ssize_t>(span.size())});
+  if (!span.empty()) {
+    std::memcpy(arr.mutable_data(), span.data(), span.size() * sizeof(T));
+  }
+  return arr;
+}
 
 }  // namespace yggdrasil_decision_forests::port::python
 

@@ -46,6 +46,7 @@
 #include "yggdrasil_decision_forests/learner/decision_tree/generic_parameters.h"
 #include "yggdrasil_decision_forests/learner/decision_tree/label.h"
 #include "yggdrasil_decision_forests/learner/decision_tree/preprocessing.h"
+#include "yggdrasil_decision_forests/learner/decision_tree/splitter_accumulator.h"
 #include "yggdrasil_decision_forests/learner/decision_tree/training.h"
 #include "yggdrasil_decision_forests/learner/decision_tree/uplift.h"
 #include "yggdrasil_decision_forests/learner/decision_tree/utils.h"
@@ -91,7 +92,7 @@ SplitterWorkResponse FakeFindBestConditionConcurrentConsumerMultiplicative(
     SplitterWorkRequest request) {
   SplitterWorkResponse response(request.manager_data,
                                 SplitSearchResult::kBetterSplitFound,
-                                absl::make_unique<proto::NodeCondition>());
+                                std::make_unique<proto::NodeCondition>());
   response.condition->set_split_score(request.attribute_idx * 10.f);
   return response;
 }
@@ -102,7 +103,7 @@ SplitterWorkResponse FakeFindBestConditionConcurrentConsumerAlternate(
     SplitterWorkRequest request) {
   auto response = SplitterWorkResponse(
       request.manager_data, SplitSearchResult::kBetterSplitFound,
-      absl::make_unique<proto::NodeCondition>());
+      std::make_unique<proto::NodeCondition>());
   if (request.attribute_idx % 2 == 0) {
     response.status = SplitSearchResult::kInvalidAttribute;
   }
@@ -2059,6 +2060,7 @@ TYPED_TEST(FindBestSplitTest, FindBestCategoricalSetSplitCartForRegression) {
 
   utils::RandomEngine rnd(1234);
   proto::NodeCondition best_condition;
+  SplitterPerThreadCache cache;
   proto::DecisionTreeTrainingConfig dt_config;
   dt_config.mutable_categorical_set_greedy_forward()->set_sampling(1.f);
 
@@ -2066,7 +2068,7 @@ TYPED_TEST(FindBestSplitTest, FindBestCategoricalSetSplitCartForRegression) {
                 TestFixture::kWeighted>(
                 selected, weights, attributes_non_valid, labels_v1,
                 num_attribute_classes, min_num_obs, dt_config,
-                label_distribution_v1, -1, &best_condition, &rnd)
+                label_distribution_v1, -1, &best_condition, &cache, &rnd)
                 .value(),
             SplitSearchResult::kInvalidAttribute);
 
@@ -2074,7 +2076,7 @@ TYPED_TEST(FindBestSplitTest, FindBestCategoricalSetSplitCartForRegression) {
                 TestFixture::kWeighted>(
                 selected, weights, attributes_perfect, labels_v1,
                 num_attribute_classes, min_num_obs, dt_config,
-                label_distribution_v1, -1, &best_condition, &rnd)
+                label_distribution_v1, -1, &best_condition, &cache, &rnd)
                 .value(),
             SplitSearchResult::kBetterSplitFound);
 
@@ -2107,7 +2109,7 @@ TYPED_TEST(FindBestSplitTest, FindBestCategoricalSetSplitCartForRegression) {
                 TestFixture::kWeighted>(
                 selected, weights, attributes_perfect, labels_v2,
                 num_attribute_classes, min_num_obs, dt_config,
-                label_distribution_v2, -1, &best_condition_v2, &rnd)
+                label_distribution_v2, -1, &best_condition_v2, &cache, &rnd)
                 .value(),
             SplitSearchResult::kBetterSplitFound);
 
@@ -2171,6 +2173,7 @@ TEST(FindBestSplitTest,
 
   utils::RandomEngine rnd(1234);
   proto::NodeCondition best_condition;
+  SplitterPerThreadCache cache;
   proto::DecisionTreeTrainingConfig dt_config;
   dt_config.mutable_categorical_set_greedy_forward()->set_sampling(1.f);
   dt_config.mutable_categorical_set_greedy_forward()->set_max_selected_items(2);
@@ -2178,7 +2181,7 @@ TEST(FindBestSplitTest,
   EXPECT_EQ(
       FindSplitLabelRegressionFeatureCategoricalSetGreedyForward<false>(
           selected, {}, attributes, labels, num_attribute_classes, min_num_obs,
-          dt_config, label_distribution, -1, &best_condition, &rnd)
+          dt_config, label_distribution, -1, &best_condition, &cache, &rnd)
           .value(),
       SplitSearchResult::kBetterSplitFound);
 
@@ -2216,25 +2219,31 @@ TEST(DecisionTree, MaskItemsForCategoricalForSetGreedySelection) {
   dt_config.mutable_categorical_set_greedy_forward()->set_sampling(1.f);
   {
     std::vector<bool> candidate_attributes_bitmap(num_attribute_classes, true);
-    internal::MaskPureSampledOrPrunedItemsForCategoricalSetGreedySelection(
-        dt_config, num_attribute_classes, selected_examples,
-        count_examples_without_weights_by_attribute_class,
-        &candidate_attributes_bitmap, &random);
+    std::vector<int> candidate_attributes_list;
+    internal::
+        MaskPureSampledOrPrunedAttributeValuesForCategoricalSetGreedySelection(
+            dt_config, num_attribute_classes, selected_examples,
+            count_examples_without_weights_by_attribute_class,
+            &candidate_attributes_bitmap, &candidate_attributes_list, &random);
     // All the candidate items are selected.
     EXPECT_EQ(candidate_attributes_bitmap,
               std::vector<bool>({false, false, true, true, true}));
+    EXPECT_EQ(candidate_attributes_list, std::vector<int>({2, 3, 4}));
   }
 
   dt_config.mutable_categorical_set_greedy_forward()->set_sampling(0.f);
   {
     std::vector<bool> candidate_attributes_bitmap(num_attribute_classes, true);
-    internal::MaskPureSampledOrPrunedItemsForCategoricalSetGreedySelection(
-        dt_config, num_attribute_classes, selected_examples,
-        count_examples_without_weights_by_attribute_class,
-        &candidate_attributes_bitmap, &random);
+    std::vector<int> candidate_attributes_list;
+    internal::
+        MaskPureSampledOrPrunedAttributeValuesForCategoricalSetGreedySelection(
+            dt_config, num_attribute_classes, selected_examples,
+            count_examples_without_weights_by_attribute_class,
+            &candidate_attributes_bitmap, &candidate_attributes_list, &random);
     // None of the items are selected.
     EXPECT_EQ(candidate_attributes_bitmap,
               std::vector<bool>({false, false, false, false, false}));
+    EXPECT_EQ(candidate_attributes_list, std::vector<int>());
   }
 
   dt_config.mutable_categorical_set_greedy_forward()->set_sampling(1.f);
@@ -2242,13 +2251,16 @@ TEST(DecisionTree, MaskItemsForCategoricalForSetGreedySelection) {
       4);  // The first 4 items.
   {
     std::vector<bool> candidate_attributes_bitmap(num_attribute_classes, true);
-    internal::MaskPureSampledOrPrunedItemsForCategoricalSetGreedySelection(
-        dt_config, num_attribute_classes, selected_examples,
-        count_examples_without_weights_by_attribute_class,
-        &candidate_attributes_bitmap, &random);
+    std::vector<int> candidate_attributes_list;
+    internal::
+        MaskPureSampledOrPrunedAttributeValuesForCategoricalSetGreedySelection(
+            dt_config, num_attribute_classes, selected_examples,
+            count_examples_without_weights_by_attribute_class,
+            &candidate_attributes_bitmap, &candidate_attributes_list, &random);
     // The last candidate item is not selected.
     EXPECT_EQ(candidate_attributes_bitmap,
               std::vector<bool>({false, false, true, true, false}));
+    EXPECT_EQ(candidate_attributes_list, std::vector<int>({2, 3}));
   }
 
   dt_config.mutable_categorical_set_greedy_forward()->set_max_num_items(-1);
@@ -2257,12 +2269,15 @@ TEST(DecisionTree, MaskItemsForCategoricalForSetGreedySelection) {
   // examples.
   {
     std::vector<bool> candidate_attributes_bitmap(num_attribute_classes, true);
-    internal::MaskPureSampledOrPrunedItemsForCategoricalSetGreedySelection(
-        dt_config, num_attribute_classes, selected_examples,
-        count_examples_without_weights_by_attribute_class,
-        &candidate_attributes_bitmap, &random);
+    std::vector<int> candidate_attributes_list;
+    internal::
+        MaskPureSampledOrPrunedAttributeValuesForCategoricalSetGreedySelection(
+            dt_config, num_attribute_classes, selected_examples,
+            count_examples_without_weights_by_attribute_class,
+            &candidate_attributes_bitmap, &candidate_attributes_list, &random);
     EXPECT_EQ(candidate_attributes_bitmap,
               std::vector<bool>({false, false, false, true, true}));
+    EXPECT_EQ(candidate_attributes_list, std::vector<int>({3, 4}));
   }
 }
 
@@ -3117,7 +3132,7 @@ TEST(Monotonic,
   EXPECT_EQ(best_condition.na_value(), false);
   EXPECT_EQ(best_condition.num_training_examples_with_weight(), 4);
   EXPECT_EQ(best_condition.num_pos_training_examples_with_weight(), 2);
-  EXPECT_NEAR(best_condition.split_score(), 5 * 20 / 2 * 2, TEST_PRECISION);
+  EXPECT_NEAR(best_condition.split_score(), 300.0, TEST_PRECISION);
 }
 
 TEST(
@@ -3146,6 +3161,103 @@ TEST(
                 {}, 1, &best_condition, &cache)
                 .value(),
             SplitSearchResult::kInvalidAttribute);
+}
+
+TEST(Hessian,
+     FindSplitLabelHessianRegressionFeatureNumericalCartMinSumHessianInLeaf) {
+  std::vector<float> weights;
+  const std::vector<UnsignedExampleIdx> selected_examples{0, 1, 2, 3};
+  const std::vector<float> attributes{1, 2, 3, 4};
+  const std::vector<float> gradients{-10, -10, 10, 10};
+  const std::vector<float> hessians{1, 1, 1, 1};
+
+  proto::DecisionTreeTrainingConfig dt_config;
+  dt_config.mutable_internal()->set_sorting_strategy(
+      proto::DecisionTreeTrainingConfig::Internal::IN_NODE);
+  const double sum_gradient =
+      std::accumulate(gradients.begin(), gradients.end(), 0.);
+  const double sum_hessian =
+      std::accumulate(hessians.begin(), hessians.end(), 0.);
+  const double sum_weights = selected_examples.size();
+
+  // Split is at 2.5: Left has sum_hessian = 2, Right has sum_hessian = 2.
+  {
+    // min_sum_hessian_in_leaf = 1.5 <= 2.0 -> split found.
+    InternalTrainConfig internal_config;
+    internal_config.min_sum_hessian_in_leaf = 1.5;
+    proto::NodeCondition best_condition;
+    SplitterPerThreadCache cache;
+    EXPECT_EQ(FindSplitLabelHessianRegressionFeatureNumericalCart<false>(
+                  selected_examples, weights, attributes, gradients, hessians,
+                  /*na_replacement=*/2, /*min_num_obs=*/1, dt_config,
+                  sum_gradient, sum_hessian, sum_weights, -1, internal_config,
+                  {}, 0, &best_condition, &cache)
+                  .value(),
+              SplitSearchResult::kBetterSplitFound);
+  }
+  {
+    // min_sum_hessian_in_leaf = 2.5 > 2.0 -> split rejected.
+    InternalTrainConfig internal_config;
+    internal_config.min_sum_hessian_in_leaf = 2.5;
+    proto::NodeCondition best_condition;
+    SplitterPerThreadCache cache;
+    EXPECT_EQ(FindSplitLabelHessianRegressionFeatureNumericalCart<false>(
+                  selected_examples, weights, attributes, gradients, hessians,
+                  /*na_replacement=*/2, /*min_num_obs=*/1, dt_config,
+                  sum_gradient, sum_hessian, sum_weights, -1, internal_config,
+                  {}, 0, &best_condition, &cache)
+                  .value(),
+              SplitSearchResult::kInvalidAttribute);
+  }
+}
+
+TEST(Hessian,
+     FindSplitLabelHessianRegressionFeatureNumericalCartWithAsymmetricHessian) {
+  std::vector<float> weights;
+  const std::vector<UnsignedExampleIdx> selected_examples{0, 1, 2, 3};
+  const std::vector<float> attributes{1, 2, 3, 4};
+  const std::vector<float> gradients{-10, -10, 10, 10};
+  const std::vector<float> hessians{1, 1, 5, 5};
+
+  proto::DecisionTreeTrainingConfig dt_config;
+  dt_config.mutable_internal()->set_sorting_strategy(
+      proto::DecisionTreeTrainingConfig::Internal::IN_NODE);
+  const double sum_gradient =
+      std::accumulate(gradients.begin(), gradients.end(), 0.);
+  const double sum_hessian =
+      std::accumulate(hessians.begin(), hessians.end(), 0.);
+  const double sum_weights = selected_examples.size();
+
+  // Split is at 2.5: Left has sum_hessian = 2, Right has sum_hessian = 10.
+  {
+    // min_sum_hessian_in_leaf = 3.0: Left violates (2 < 3.0), so split
+    // rejected.
+    InternalTrainConfig internal_config;
+    internal_config.min_sum_hessian_in_leaf = 3.0;
+    proto::NodeCondition best_condition;
+    SplitterPerThreadCache cache;
+    EXPECT_EQ(FindSplitLabelHessianRegressionFeatureNumericalCart<false>(
+                  selected_examples, weights, attributes, gradients, hessians,
+                  /*na_replacement=*/0, /*min_num_obs=*/2, dt_config,
+                  sum_gradient, sum_hessian, sum_weights, -1, internal_config,
+                  {}, 0, &best_condition, &cache)
+                  .value(),
+              SplitSearchResult::kInvalidAttribute);
+  }
+  {
+    // min_sum_hessian_in_leaf = 2.0: Both satisfy (2 >= 2.0, 10 >= 2.0).
+    InternalTrainConfig internal_config;
+    internal_config.min_sum_hessian_in_leaf = 2.0;
+    proto::NodeCondition best_condition;
+    SplitterPerThreadCache cache;
+    EXPECT_EQ(FindSplitLabelHessianRegressionFeatureNumericalCart<false>(
+                  selected_examples, weights, attributes, gradients, hessians,
+                  /*na_replacement=*/0, /*min_num_obs=*/2, dt_config,
+                  sum_gradient, sum_hessian, sum_weights, -1, internal_config,
+                  {}, 0, &best_condition, &cache)
+                  .value(),
+              SplitSearchResult::kBetterSplitFound);
+  }
 }
 
 struct GenericHyperParameterTestDef {
@@ -3198,6 +3310,27 @@ INSTANTIATE_TEST_SUITE_P(
             "fields{name:'mhld_oblique_sample_attributes' value {categorical: "
             "'true'}}",
             "mhld_oblique_split { sample_attributes: true}"}));
+
+TEST(DecisionTree, LabelHessianNumericalBucketFillerFinalizeClamping) {
+  std::vector<float> empty_gradients;
+  std::vector<float> empty_hessians;
+  std::vector<float> empty_weights;
+
+  LabelHessianNumericalBucket</*weighted=*/false>::Filler filler(
+      empty_gradients, empty_hessians, empty_weights, /*hessian_l1=*/0.0,
+      /*hessian_l2=*/0.0);
+
+  LabelHessianNumericalBucket</*weighted=*/false> bucket;
+  bucket.content.sum_gradient = 1.0f;
+  bucket.content.sum_hessian = 0.0001f;
+
+  filler.Finalize(&bucket);
+
+  // Expected priority:
+  // clamped_hessian = max(0.0001, 0.001) = 0.001
+  // priority = 1.0 / 0.001 = 1000.0
+  EXPECT_NEAR(bucket.priority, 1000.0f, 1e-5f);
+}
 
 }  // namespace
 }  // namespace decision_tree
